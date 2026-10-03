@@ -5,6 +5,7 @@
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "keep_vars": true,
   "observability": { "enabled": false },
   "d1_databases": [
     {

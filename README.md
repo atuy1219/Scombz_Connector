@@ -27,6 +27,14 @@ node scripts/generate-secrets.mjs
 
 ランダムな64桁の16進数が2つ出ます。各利用者が異なるキーを生成してください。`ADMIN_TOKEN` は管理画面とOAuth承認で使うため、パスワードマネージャー等で保管します。`SESSION_ENCRYPTION_KEY` はセッション暗号化、OAuthクライアント情報・資料リンクの署名に使います。実際の値をGitHubやチャットに貼らないでください。
 
+### 更新時のキーと接続の維持
+
+通常のコード更新では、同じWorker URL・D1・キーを使い続けます。キーを毎回生成し直す必要はありません。Cloudflareの本番Workerの **Settings → Variables and Secrets** で、2つとも種類 **Secret** として保存し、Deployで反映してください。Buildの環境変数はWorker実行時のSecretとは別です。保存したSecretの値は管理画面から再表示できませんが、変数名が残っていれば値が見えないだけで消えたとは限りません。
+
+Wranglerはデプロイ時に既存Secretを保持します。このプロジェクトでは `keep_vars: true` も指定し、管理画面で追加した通常の変数も更新時に保持します。ただし認証・暗号化キーは通常の変数ではなくSecretとして保存してください。
+
+`SESSION_ENCRYPTION_KEY` を変更すると既存のセッション、OAuthクライアント・トークン、資料リンクが無効になります。元のキーを安全に保管していれば元に戻してください。元のキーを失った場合は新しいキーを一度だけSecretとして保存し、session.jsonを再登録したうえでChatGPTのコネクタをDCRで作り直します。キーの変更は、通常の更新とは別の復旧作業です。
+
 ## session.jsonを作成する
 
 本人のPCで実行します。ScombZへのログイン・MFAはローカルブラウザで行います。Workerへパスワードを送る機能はありません。
