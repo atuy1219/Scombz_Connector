@@ -1,0 +1,37 @@
+{
+  "name": "scombz-connector",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "node --test tests/*.test.mjs",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
+    "db:local": "wrangler d1 migrations apply DB --local",
+    "check": "npm test && npm run build && wrangler deploy --dry-run",
+    "format": "prettier --write \"src/**/*.mjs\" \"scripts/*.mjs\" \"tests/**/*.mjs\" package.json wrangler.jsonc \".github/workflows/*.yml\""
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "cheerio": "^1.2.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "miniflare": "^4.20260730.0",
+    "playwright": "^1.63.0",
+    "prettier": "^3.9.9",
+    "wrangler": "^4.147.0"
+  },
+  "cloudflare": {
+    "bindings": {
+      "ADMIN_TOKEN": {
+        "description": "管理画面とOAuthの承認に使う秘密鍵。node scripts/generate-secrets.mjs で生成したADMIN_TOKENを入力。"
+      },
+      "SESSION_ENCRYPTION_KEY": {
+        "description": "D1のセッション暗号化に使う64桁の16進数。node scripts/generate-secrets.mjs で生成した値を入力。"
+      }
+    }
+  }
+}

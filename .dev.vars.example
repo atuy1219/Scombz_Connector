@@ -1,0 +1,3 @@
+# 実際の値はコミットしない。node scripts/generate-secrets.mjs で生成。
+ADMIN_TOKEN=
+SESSION_ENCRYPTION_KEY=

@@ -1,0 +1,13 @@
+node_modules/
+.wrangler/
+dist/
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+.env
+.env.*
+!.env.example
+session.json
+*session*.json
+.private/
+*.log
