@@ -149,24 +149,24 @@ export async function handle(request, env, options = {}) {
           { message: 'ファイルリンクの期限が切れた場合はread_fileを再実行してください。' },
           401,
         );
-      const file = await new ScombClient(env, options).materialFile(courseId, fileId);
-      return new Response(file.bytes, {
-        headers: {
-          'Content-Type': file.mime,
-          'Cache-Control': 'private, no-store',
-          'Referrer-Policy': 'no-referrer',
-          'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.metadata.filename).replace(/'/g, '%27')}`,
-          'X-Content-Type-Options': 'nosniff',
-          'Content-Security-Policy': "default-src 'none'; sandbox",
-        },
-      });
+      const file = await new ScombClient(env, options).materialStream(courseId, fileId);
+      const headers = {
+        'Content-Type': file.mime,
+        'Cache-Control': 'private, no-store',
+        'Referrer-Policy': 'no-referrer',
+        'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent(file.metadata.filename).replace(/'/g, '%27')}`,
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+      };
+      if (file.bytes !== null) headers['Content-Length'] = String(file.bytes);
+      return new Response(file.body, { headers });
     }
     return json({ message: 'Not found' }, 404);
   } catch (error) {
     if (error instanceof ScombError)
       return json(
         { code: error.code, message: error.message },
-        error.code === 'auth_required' ? 401 : 422,
+        error.code === 'auth_required' ? 401 : error.code === 'file_too_large' ? 413 : 422,
       );
     return json(
       {
