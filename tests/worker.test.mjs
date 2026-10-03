@@ -90,8 +90,16 @@ before(async () => {
       const path = new URL(request.url).pathname;
       if (path === '/lms/course') return new Response(course);
       if (path === '/lms/course/make/tempfile') return new Response('temporary-id');
-      if (path.startsWith('/lms/course/material/setfiledown/'))
+      if (path.startsWith('/lms/course/material/setfiledown/')) {
+        if (upstreamMode === 'large')
+          return new Response('%PDF-1.7 fixture', {
+            headers: {
+              'Content-Type': 'application/pdf',
+              'Content-Length': String(100 * 1024 * 1024 + 1),
+            },
+          });
         return new Response('%PDF-1.7 fixture', { headers: { 'Content-Type': 'application/pdf' } });
+      }
       return new Response(page('home'));
     },
   });
@@ -304,7 +312,8 @@ test('PKCE exchange, code replay prevention and private MCP work in workerd', as
   const rows = await db.prepare('SELECT hash FROM oauth_tokens').all();
   assert.ok(!JSON.stringify(rows).includes(accessToken));
 });
-test('read_file returns a scoped signed link and PDF bytes without extracting in Worker', async () => {
+test('read_file returns a temporary scoped link and streams PDF only when downloaded', async () => {
+  const beforeRead = upstream;
   const response = await rpc(
     'read_file',
     { course_id: 'c', file_id: 'material:m:r', start_page: 1, end_page: 2 },
@@ -314,13 +323,30 @@ test('read_file returns a scoped signed link and PDF bytes without extracting in
   const value = (await response.json()).result.structuredContent;
   assert.equal(value.format, 'pdf');
   assert.equal(value.text, null);
+  assert.equal(value.bytes, null);
+  assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
+  assert.equal(value.retention, 'not_stored_by_connector');
+  assert.equal(upstream, beforeRead + 1, 'read_file must not download the PDF body');
   assert.ok(value.download_url);
   assert.ok(!value.download_url.includes('private-fixture-cookie'));
+
   const url = new URL(value.download_url);
+  const beforeDownload = upstream;
   const result = await req(url.pathname + url.search);
   assert.equal(result.status, 200);
   assert.equal(await result.text(), '%PDF-1.7 fixture');
   assert.equal(result.headers.get('cache-control'), 'private, no-store');
+  assert.equal(upstream, beforeDownload + 3, 'download resolves metadata, tempfile and original once');
+
+  upstreamMode = 'large';
+  try {
+    const tooLarge = await req(url.pathname + url.search);
+    assert.equal(tooLarge.status, 413);
+    assert.equal((await tooLarge.json()).code, 'file_too_large');
+  } finally {
+    upstreamMode = 'ok';
+  }
+
   assert.equal(
     (await req(url.pathname + url.search.replace('material%3Am%3Ar', 'material%3Am%3As'))).status,
     401,
