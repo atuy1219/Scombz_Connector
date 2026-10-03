@@ -1,7 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
-import { ScombClient, ScombError } from './client.mjs';
+import { ScombClient, ScombError, MAX_FILE_BYTES } from './client.mjs';
 import { publicFile } from './parsers.mjs';
 import { fileText } from './files.mjs';
 import { sign } from './crypto.mjs';
@@ -13,6 +13,7 @@ const id = z
 const fileId = z.string().regex(/^(material|assignment):[A-Za-z0-9_-]+:[A-Za-z0-9_-]+$/);
 const semester = z.enum(['first', 'second']);
 const year = z.number().int().min(1990).max(2100);
+const textFile = /\.(txt|md|csv|tsv|json|xml|py|js|java|c|h|cpp|tex|sql|yaml|yml)$/i;
 const readonly = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -167,7 +168,7 @@ export async function mcpResponse(request, env, options = {}) {
   register(
     'read_file',
     '教材・課題添付を読む',
-    '一覧にあるファイルを取得します。PDFは原本の期限付きURLを返し、ChatGPT側で読みます。テキストは本文を抽出します。最大8MiB。',
+    '一覧にあるファイルを読みます。原本はConnectorに保存せず、最大100MiBを5分間の署名付きURLからストリーミング取得できます。PDF・バイナリは原本URLを返し、テキストは小さい場合だけ本文を抽出します。',
     {
       course_id: id,
       file_id: fileId,
@@ -181,7 +182,8 @@ export async function mcpResponse(request, env, options = {}) {
         (args.end_page < args.start_page || args.end_page - args.start_page >= 10)
       )
         throw new ScombError('invalid_page_range', '一度に最大10ページを指定してください。');
-      const file = await client.materialFile(args.course_id, args.file_id);
+
+      const metadata = await client.materialInfo(args.course_id, args.file_id);
       const expires = Math.floor(Date.now() / 1000) + 300;
       const ticket = await sign(env, {
         kind: 'file',
@@ -198,17 +200,57 @@ export async function mcpResponse(request, env, options = {}) {
         encodeURIComponent(args.file_id) +
         '&ticket=' +
         encodeURIComponent(ticket);
+
+      const name = metadata.filename.toLowerCase();
+      let mime = name.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream';
+      let bytes = null;
       let extracted;
-      try {
-        extracted = await fileText(file, args);
-      } catch (error) {
-        if (!(error instanceof ScombError) || error.code !== 'extraction_failed') throw error;
-        extracted = { format: 'pdf', text: null, warnings: [error.message] };
+      if (name.endsWith('.pdf')) {
+        extracted = {
+          format: 'pdf',
+          text: null,
+          requested_pages: {
+            start_page: args.start_page,
+            end_page: args.end_page ?? args.start_page + 9,
+          },
+          warnings: [
+            'PDF原本をdownload_urlから取得し、クライアント側で読んでください。Connectorは原本を永続保存しません。',
+          ],
+        };
+      } else if (textFile.test(name)) {
+        try {
+          const file = await client.materialFile(args.course_id, args.file_id);
+          mime = file.mime;
+          bytes = file.bytes.length;
+          extracted = await fileText(file, args);
+        } catch (error) {
+          if (!(error instanceof ScombError) || error.code !== 'file_too_large') throw error;
+          mime = 'text/plain';
+          extracted = {
+            format: 'text',
+            text: null,
+            truncated: true,
+            warnings: [
+              'テキスト本文は8MiBを超えるためWorker内では展開しません。原本をdownload_urlから取得してください。',
+            ],
+          };
+        }
+      } else {
+        extracted = {
+          format: 'binary',
+          text: null,
+          warnings: [
+            '原本をdownload_urlから取得してください。Connectorは原本を永続保存しません。',
+          ],
+        };
       }
+
       return {
-        file: file.metadata,
-        mime_type: file.mime,
-        bytes: file.bytes.length,
+        file: metadata,
+        mime_type: mime,
+        bytes,
+        download_limit_bytes: MAX_FILE_BYTES,
+        retention: 'not_stored_by_connector',
         download_url: downloadUrl,
         download_expires_at: new Date(expires * 1000).toISOString(),
         ...extracted,

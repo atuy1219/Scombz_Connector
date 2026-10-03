@@ -45,7 +45,8 @@ const SAFE_QUERY_KEYS = new Set([
 ]);
 const HOST = new URL(BASE).hostname;
 
-export const MAX_FILE_BYTES = 8 * 1024 * 1024;
+export const MAX_FILE_BYTES = 100 * 1024 * 1024;
+export const MAX_INLINE_FILE_BYTES = 8 * 1024 * 1024;
 
 export class ScombError extends Error {
   constructor(code, message) {
@@ -139,6 +140,48 @@ async function readBounded(response, maximum) {
   return bytes;
 }
 
+function contentLength(response) {
+  const raw = response.headers.get('content-length');
+  if (!raw) return null;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+function boundedBody(response, maximum) {
+  const declared = contentLength(response);
+  if (declared !== null && declared > maximum)
+    throw new ScombError('file_too_large', 'ファイルが取得上限を超えています。');
+  const reader = response.body?.getReader();
+  if (!reader) return { body: null, bytes: declared ?? 0 };
+  let size = 0;
+  return {
+    bytes: declared,
+    body: new ReadableStream({
+      async pull(controller) {
+        try {
+          const { done, value } = await reader.read();
+          if (done) {
+            controller.close();
+            return;
+          }
+          size += value.byteLength;
+          if (size > maximum) {
+            await reader.cancel().catch(() => {});
+            controller.error(new ScombError('file_too_large', 'ファイルが取得上限を超えています。'));
+            return;
+          }
+          controller.enqueue(value);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      cancel(reason) {
+        return reader.cancel(reason);
+      },
+    }),
+  };
+}
+
 export class ScombClient {
   constructor(env, options = {}) {
     this.env = env;
@@ -186,7 +229,7 @@ export class ScombClient {
       response = await this.fetch(u.href, {
         method: 'GET',
         redirect: 'manual',
-        signal: AbortSignal.timeout(25000),
+        signal: AbortSignal.timeout(binary ? 120000 : 25000),
         headers: {
           'User-Agent': 'Mozilla/5.0',
           'Accept-Language': 'ja,en;q=0.8',
@@ -348,7 +391,7 @@ export class ScombClient {
       source_url: BASE + selected,
     };
   }
-  async materialFile(courseId, fileId) {
+  async materialRecord(courseId, fileId) {
     const course = await this.course(courseId);
     let file = course.files.find((x) => x.file_id === fileId);
     if (!file && fileId.startsWith('assignment:')) {
@@ -373,6 +416,13 @@ export class ScombClient {
         'not_found',
         '指定したファイルは、科目の教材または課題添付として確認できません。',
       );
+    return file;
+  }
+  async materialInfo(courseId, fileId) {
+    return publicFile(await this.materialRecord(courseId, fileId));
+  }
+  async openMaterialFile(courseId, fileId) {
+    const file = await this.materialRecord(courseId, fileId);
     let download;
     if (file.kind === 'material') {
       const params = new URLSearchParams({
@@ -416,16 +466,28 @@ export class ScombClient {
         query;
     }
     const response = await this.request(download, true);
-    const bytes = await readBounded(response, MAX_FILE_BYTES);
     const mime = response.headers.get('content-type') ?? 'application/octet-stream';
     if (mime.includes('text/html')) {
+      const bytes = await readBounded(response, 1024 * 1024);
       const state = pageState(new TextDecoder().decode(bytes));
       if (state.login)
         throw new ScombError('auth_required', 'ファイル取得には再ログインが必要です。');
       if (state.header)
         throw new ScombError('unavailable', 'ファイルではなくScombZの案内画面が返りました。');
+      throw new ScombError('unavailable', 'ファイルではなくHTMLが返りました。');
     }
     await this.saveSession();
-    return { metadata: publicFile(file), mime, bytes };
+    return { metadata: publicFile(file), mime, response };
   }
+  async materialFile(courseId, fileId, maximum = MAX_INLINE_FILE_BYTES) {
+    const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);
+    const bytes = await readBounded(response, maximum);
+    return { metadata, mime, bytes };
+  }
+  async materialStream(courseId, fileId) {
+    const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);
+    const { body, bytes } = boundedBody(response, MAX_FILE_BYTES);
+    return { metadata, mime, body, bytes };
+  }
+
 }
