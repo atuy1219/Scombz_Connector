@@ -259,6 +259,19 @@ test('authorization binds redirect, resource, scope and S256 PKCE', async () => 
     400,
   );
 });
+test('OAuth consent preserves form Origin and rejects absent, opaque and foreign origins', async () => {
+  const { response } = await authorize();
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('referrer-policy'), 'same-origin');
+  const ticket = (await response.text()).match(/name="ticket" value="([^"]+)"/)[1];
+  const data = { ticket, admin_token: bindings.ADMIN_TOKEN };
+  for (const headers of [{}, { Origin: 'null' }, { Origin: 'https://evil.example' }]) {
+    assert.equal((await form('/oauth/approve', data, headers)).status, 403);
+  }
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM oauth_codes').first()).n, 0);
+  assert.equal((await form('/oauth/approve', data, { Origin: origin })).status, 303);
+  await db.prepare('DELETE FROM oauth_codes').run();
+});
 test('PKCE exchange, code replay prevention and private MCP work in workerd', async () => {
   const data = await codeForClient();
   assert.equal((await form('/oauth/token', { ...data, code_verifier: random() })).status, 400);

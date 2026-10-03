@@ -14,7 +14,9 @@ export function htmlResponse(html) {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
-      'Referrer-Policy': 'no-referrer',
+      // Preserve Origin on same-origin form POSTs while withholding referrers
+      // from the external OAuth callback. no-referrer makes form Origin null.
+      'Referrer-Policy': 'same-origin',
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',
       'Content-Security-Policy':
