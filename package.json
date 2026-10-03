@@ -6,6 +6,7 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.mjs",
+    "test:browser": "node --test tests/browser-oauth.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler deploy && wrangler d1 migrations apply DB --remote",
     "db:local": "wrangler d1 migrations apply DB --local",

@@ -263,6 +263,14 @@ test('OAuth consent preserves form Origin and rejects absent, opaque and foreign
   const { response } = await authorize();
   assert.equal(response.status, 200);
   assert.equal(response.headers.get('referrer-policy'), 'same-origin');
+  assert.equal(
+    response.headers.get('content-security-policy').split('form-action ')[1],
+    "'self' https://chatgpt.com",
+  );
+  assert.equal(
+    (await req('/')).headers.get('content-security-policy').split('form-action ')[1],
+    "'self'",
+  );
   const ticket = (await response.text()).match(/name="ticket" value="([^"]+)"/)[1];
   const data = { ticket, admin_token: bindings.ADMIN_TOKEN };
   for (const headers of [{}, { Origin: 'null' }, { Origin: 'https://evil.example' }]) {

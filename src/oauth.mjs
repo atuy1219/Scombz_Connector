@@ -9,7 +9,12 @@ export const escape = (value) =>
     /[&<>"']/g,
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c],
   );
-export function htmlResponse(html) {
+export function htmlResponse(html, formRedirectUri) {
+  // Browsers also check form-action on the 303 OAuth callback after approval.
+  // Only the validated, registered callback origin may join the Worker itself.
+  const formRedirectOrigin = validRedirect(formRedirectUri)
+    ? ' ' + new URL(formRedirectUri).origin
+    : '';
   return new Response(html, {
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
@@ -20,7 +25,8 @@ export function htmlResponse(html) {
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'DENY',
       'Content-Security-Policy':
-        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'" +
+        formRedirectOrigin,
     },
   });
 }
@@ -227,6 +233,7 @@ export async function oauth(request, env, origin) {
     });
     return htmlResponse(
       `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ScombZへの接続を承認</title><style>body{font:16px system-ui;max-width:560px;margin:60px auto;padding:24px;line-height:1.8}input,button{font:inherit;padding:12px;width:100%;box-sizing:border-box;margin:10px 0}code{overflow-wrap:anywhere}</style><h1>ScombZへの接続を承認</h1><p>${escape(registration.name)} に、あなたの時間割・教材・課題等を読み取る権限を与えます。</p><p>戻り先: <code>${escape(new URL(p.get('redirect_uri')).origin)}</code></p><p>このWorkerの管理キーを入力してください。ScombZのパスワードは入力しません。</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${escape(ticket)}"><input name="admin_token" type="password" autocomplete="off" required aria-label="管理キー"><button>接続を承認</button></form></html>`,
+      p.get('redirect_uri'),
     );
   }
   if (path === '/oauth/approve' && request.method === 'POST') {
