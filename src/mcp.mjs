@@ -259,7 +259,7 @@ export async function mcpResponse(request, env, options = {}) {
           embeddedResource = {
             type: 'resource',
             resource: {
-              uri: downloadUrl,
+              uri: 'scombz://material/' + encodeURIComponent(metadata.filename),
               mimeType: mime,
               blob: base64Bytes(file.bytes),
             },
