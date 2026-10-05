@@ -7,7 +7,7 @@ export const SCOMBZ_HOST = 'scombz.shibaura-it.ac.jp';
 
 const MAX_JSON_BYTES = 1024 * 1024;
 const ALLOWED_BRIDGE_HOSTS = new Set([MOBILE_WEB_HOST, SCOMBZ_HOST]);
-const BRIDGE_PATHS = ['/portal/home', '/lms/timetable?selectDisplayMode=0', '/lms/task'];
+const FALLBACK_BRIDGE_PATHS = ['/portal/home', '/lms/timetable?selectDisplayMode=0', '/lms/task'];
 
 async function readJson(response) {
   const declared = Number(response.headers.get('content-length') ?? 0);
@@ -178,11 +178,29 @@ export class MobileAuthClient {
       length: validSecret(body?.sessionid) ? body.sessionid.length : 0,
     };
   }
+  async probeCoursePath() {
+    const now = new Date(Date.now() + 9 * 3600000);
+    const month = now.getUTCMonth() + 1;
+    const year = now.getUTCFullYear() - (month <= 3 ? 1 : 0);
+    const term = month >= 4 && month <= 8 ? '01' : '02';
+    try {
+      const rows = await this.apiGet(`timetable/${year}${term}`);
+      const course = Array.isArray(rows)
+        ? rows.find((row) => typeof row?.classId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(row.classId))
+        : null;
+      return course ? '/lms/course?idnumber=' + encodeURIComponent(course.classId) : null;
+    } catch (error) {
+      if (error instanceof ScombError && error.code === 'mobile_auth_required') throw error;
+      return null;
+    }
+  }
   async exchangeOtkey() {
     const otkey = await this.getOtkey();
+    const coursePath = await this.probeCoursePath();
+    const candidates = coursePath ? [coursePath, ...FALLBACK_BRIDGE_PATHS] : FALLBACK_BRIDGE_PATHS;
     const diagnostics = [];
     const cookieJar = new Map();
-    for (const candidate of BRIDGE_PATHS) {
+    for (const candidate of candidates) {
       let current = new URL(
         '/' + encodeURIComponent(otkey) + candidate,
         'https://' + MOBILE_WEB_HOST,
