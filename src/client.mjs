@@ -78,7 +78,7 @@ export function validateReadUrl(path, binary = false) {
 
 export function normalizeSession(input) {
   if (!input || !Array.isArray(input.cookies) || input.cookies.length > 30)
-    throw new ScombError('invalid_session', 'Playwright形式のセッションファイルが必要です。');
+    throw new ScombError('invalid_session', 'ScombZセッションの形式を確認できません。');
   const cookies = input.cookies
     .filter((c) => c?.domain?.replace(/^\./, '') === HOST)
     .map((c) => {
