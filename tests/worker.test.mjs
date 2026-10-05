@@ -86,6 +86,7 @@ before(async () => {
     external: ['node:*'],
   });
   mf = new Miniflare({
+    cf: false,
     modules: true,
     scriptPath: '.wrangler/test-worker.mjs',
     compatibilityDate: '2026-08-01',
@@ -132,6 +133,7 @@ before(async () => {
   for (const name of [
     '0001_initial.sql',
     '0002_mobile_auth.sql',
+    '0003_write_drafts.sql',
     '0004_session_export_scope.sql',
   ]) {
     const migration = await readFile('migrations/' + name, 'utf8');
@@ -687,4 +689,51 @@ test('revoke keeps the session; deletion removes session and OAuth grants', asyn
     (await (await req('/api/status', { headers: adminHeaders })).json()).connected,
     false,
   );
+});
+
+test('dedicated writes require independent consent and old grants cannot escalate', async () => {
+  const old = await (
+    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:session' }))
+  ).json();
+  const before = upstream;
+  const args = { course_id: 'c', assignment_id: 'r', fields: {} };
+  const denied = await rpc('prepare_assignment_submission', args, {
+    Authorization: 'Bearer ' + old.access_token,
+  });
+  assert.equal(denied.status, 401);
+  assert.ok(denied.headers.get('www-authenticate').includes('scope="scombz:write"'));
+  assert.equal(upstream, before);
+  const rotated = await (
+    await form('/oauth/token', {
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      resource: origin + '/mcp',
+      refresh_token: old.refresh_token,
+      scope: 'scombz:read scombz:session scombz:write',
+    })
+  ).json();
+  assert.equal(rotated.scope, 'scombz:read scombz:session');
+  assert.equal(
+    (
+      await rpc('prepare_assignment_submission', args, {
+        Authorization: 'Bearer ' + rotated.access_token,
+      })
+    ).status,
+    401,
+  );
+  assert.equal(upstream, before);
+  const { response } = await authorize({ scope: 'scombz:read scombz:write' });
+  const consent = await response.text();
+  assert.ok(consent.includes('OAuth承認だけでは送信しません'));
+  assert.ok(consent.includes('本人の承認を毎回必要'));
+  const approved = await (
+    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:write' }))
+  ).json();
+  assert.equal(approved.scope, 'scombz:read scombz:write');
+  // Missing target can be read, but preparation must never issue a POST upstream.
+  const prepared = await rpc('prepare_assignment_submission', args, {
+    Authorization: 'Bearer ' + approved.access_token,
+  });
+  assert.equal(prepared.status, 200);
+  assert.equal((await prepared.json()).result.isError, true);
 });
