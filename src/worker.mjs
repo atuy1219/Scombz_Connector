@@ -66,8 +66,12 @@ export async function handle(request, env, options = {}) {
         typeof rpc.method !== 'string'
       )
         return json({ message: 'Invalid JSON-RPC request' }, 400);
-      if (!discovery.has(rpc.method) && !(await access(request, env, origin))) {
-        const hint = challenge(origin);
+      const requiredScope =
+        rpc.method === 'tools/call' && rpc.params?.name === 'get_web_session'
+          ? 'scombz:session'
+          : 'scombz:read';
+      if (!discovery.has(rpc.method) && !(await access(request, env, origin, requiredScope))) {
+        const hint = challenge(origin, requiredScope);
         return json(
           {
             jsonrpc: '2.0',
@@ -77,7 +81,10 @@ export async function handle(request, env, options = {}) {
               content: [
                 {
                   type: 'text',
-                  text: 'OAuthでScombZ Connectorを接続してください。',
+                  text:
+                    requiredScope === 'scombz:session'
+                      ? 'SESSION受け渡しの権限を追加してOAuthで再接続してください。'
+                      : 'OAuthでScombZ Connectorを接続してください。',
                 },
               ],
               _meta: { 'mcp/www_authenticate': [hint] },

@@ -33,3 +33,9 @@ HTML内のQuill本文は文字列リテラルをJSONとして解析し、JavaScr
 Mobile APIのBearerを認証の基準とし、Bearerがない場合は保存済みSESSIONだけでアクセスしません。SESSIONはBearerの世代に紐づけて暗号化し、6時間でキャッシュ期限を迎えます。期限切れ・Web側の失効時だけOTKEYから再生成します。パスワードとOTKEYは保存しません。再ログイン・ログアウトと競合した古いキャッシュ更新やBearer失効処理は、新しい認証状態を書き換えません。Webのログイン画面が続いても再試行回数を制限し、無限更新しません。
 
 接続状態は`authenticated`（Bearer認証の保持）、`connected`（Webへの接続成功）、`reauthentication_required`（再ログインが必要）を区別します。保存済みBearerの存在だけでサーバー側の有効性を断定せず、Mobile APIの401/403で失効を確認したときに破棄します。通信障害や橋渡し失敗時は再ログインを要求しません。
+
+## Web認証の受け渡し
+
+`get_web_session`は`scombz:session`権限で、SESSION Cookieのみを返します。ConnectorによるHTML・教材・JavaScriptの取得は伴いません。パスワード・Mobile API Bearer・OTKEY・管理キーを返さず、取得・調査はChatGPT側へ委ねます。既存OAuthトークンはマイグレーションで`scombz:read`になり、追加権限を得るには明示的なOAuth承認が必要です。認証コード・アクセストークン・更新トークンは承認済みスコープを保持し、更新では権限を増やしません。
+
+SESSIONそのものに読み取り専用制限や受け渡し専用の寿命は設定できません。ConnectorはChatGPT側の直接通信を制御できないため、書き込み前の毎回確認はChatGPT側の操作手順に委ねます。Cookieの値をログ・通常の返信・ファイルに出力せず、ScombZ origin限定でメモリ内使用します。

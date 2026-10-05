@@ -317,3 +317,37 @@ test('an expired Web SESSION is renewed once without losing the bearer', async (
   assert.equal(exchanges, 1);
   assert.equal(requests, 2);
 });
+
+test('session export reuses cache and refreshes explicitly without retrieving web pages', async () => {
+  const cookie = {
+    name: 'SESSION',
+    value: 'fixture-session-export',
+    domain: 'scombz.shibaura-it.ac.jp',
+    path: '/',
+    secure: true,
+    httpOnly: true,
+    expires: -1,
+  };
+  let exchanges = 0;
+  const client = new ScombClient(
+    {},
+    {
+      session: { cookies: [cookie] },
+      fetch: async () => assert.fail('session export must not fetch web HTML'),
+    },
+  );
+  client.refreshSession = async () => {
+    exchanges++;
+    client.session = { cookies: [{ ...cookie, value: 'renewed-session' }] };
+    return client.session;
+  };
+  const initial = await client.exportWebSession();
+  assert.equal(initial.cookie.value, cookie.value);
+  assert.equal(exchanges, 0);
+  const renewed = await client.exportWebSession(true);
+  assert.equal(renewed.cookie.value, 'renewed-session');
+  assert.equal(exchanges, 1);
+  client.session = { cookies: [{ ...cookie, expires: 1 }] };
+  assert.equal((await client.exportWebSession()).cookie.value, 'renewed-session');
+  assert.equal(exchanges, 2);
+});
