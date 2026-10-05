@@ -31,7 +31,12 @@ test('browser OAuth form preserves Origin, follows the callback, and exchanges i
       outboundService: async () => assert.fail('OAuth fixture must not call an upstream service'),
     });
     const db = await mf.getD1Database('DB');
-    await db.exec((await readFile('migrations/0001_initial.sql', 'utf8')).replaceAll('\n', ' '));
+    for (const file of [
+      '0001_initial.sql',
+      '0003_write_drafts.sql',
+      '0004_session_export_scope.sql',
+    ])
+      await db.exec((await readFile('migrations/' + file, 'utf8')).replaceAll('\n', ' '));
     const registration = await mf.dispatchFetch(origin + '/oauth/register', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

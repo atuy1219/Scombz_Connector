@@ -3,5 +3,6 @@ CREATE TABLE write_drafts (
   data TEXT NOT NULL,
   expires_at INTEGER NOT NULL,
   state TEXT NOT NULL DEFAULT 'pending',
-  result TEXT
+  result TEXT,
+  owner TEXT NOT NULL
 );

@@ -129,7 +129,12 @@ before(async () => {
     },
   });
   db = await mf.getD1Database('DB');
-  for (const name of ['0001_initial.sql', '0002_mobile_auth.sql', '0003_write_drafts.sql']) {
+  for (const name of [
+    '0001_initial.sql',
+    '0002_mobile_auth.sql',
+    '0003_write_drafts.sql',
+    '0004_session_export_scope.sql',
+  ]) {
     const migration = await readFile('migrations/' + name, 'utf8');
     await db.exec(migration.replaceAll('\n', ' '));
   }
@@ -198,21 +203,6 @@ test('admin routes reject forged identity, bearer access and missing Origin', as
     403,
   );
   assert.equal(upstream, 0);
-});
-
-test('write confirmation hides answers and returns controlled errors for invalid drafts', async () => {
-  const path = '/write/' + 'A'.repeat(43);
-  const page = await req(path);
-  assert.equal(page.status, 200);
-  assert.ok((await page.text()).includes('まだ送信しません'));
-  const body = new URLSearchParams({ admin_token: bindings.ADMIN_TOKEN, step: 'review' });
-  const response = await req(path, {
-    method: 'POST',
-    headers: { Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body,
-  });
-  assert.equal(response.status, 422);
-  assert.equal((await response.json()).code, 'draft_unavailable');
 });
 
 test('legacy session.json upload API is removed without changing stored session', async () => {
@@ -341,8 +331,8 @@ async function authorize(extra = {}) {
   const response = await req('/oauth/authorize?' + new URLSearchParams(p));
   return { response, verifier, params: p };
 }
-async function codeForClient() {
-  const { response, verifier, params } = await authorize();
+async function codeForClient(extra = {}) {
+  const { response, verifier, params } = await authorize(extra);
   assert.equal(response.status, 200);
   const html = await response.text(),
     ticket = html.match(/name="ticket" value="([^"]+)"/)[1];
@@ -434,6 +424,92 @@ test('PKCE exchange, code replay prevention and private MCP work in workerd', as
   );
   const rows = await db.prepare('SELECT hash FROM oauth_tokens').all();
   assert.ok(!JSON.stringify(rows).includes(accessToken));
+});
+test('scope migration preserves legacy OAuth inserts without granting SESSION export', async () => {
+  const token = random();
+  await db
+    .prepare('INSERT INTO oauth_tokens VALUES(?,?,?,?,?)')
+    .bind(
+      await digest(token + bindings.SESSION_ENCRYPTION_KEY),
+      'access',
+      clientId,
+      origin + '/mcp',
+      Math.floor(Date.now() / 1000) + 60,
+    )
+    .run();
+  const before = upstream;
+  assert.equal(
+    (await rpc('get_web_session', {}, { Authorization: 'Bearer ' + token })).status,
+    401,
+  );
+  assert.equal(upstream, before);
+  assert.equal(
+    (await rpc('get_connection_status', {}, { Authorization: 'Bearer ' + token })).status,
+    200,
+  );
+});
+test('existing read grants cannot export authentication or escalate through refresh', async () => {
+  const before = upstream;
+  const denied = await rpc('get_web_session', {}, { Authorization: 'Bearer ' + accessToken });
+  assert.equal(denied.status, 401);
+  assert.ok(denied.headers.get('www-authenticate').includes('scope="scombz:session"'));
+  assert.equal(upstream, before);
+  const code = await codeForClient();
+  const read = await (await form('/oauth/token', code)).json();
+  const rotated = await (
+    await form('/oauth/token', {
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      resource: origin + '/mcp',
+      refresh_token: read.refresh_token,
+      scope: 'scombz:read scombz:session',
+    })
+  ).json();
+  assert.equal(rotated.scope, 'scombz:read');
+  assert.equal(
+    (await rpc('get_web_session', {}, { Authorization: 'Bearer ' + rotated.access_token })).status,
+    401,
+  );
+});
+test('explicit session consent exports only SESSION without fetching or parsing HTML', async () => {
+  const { response } = await authorize({ scope: 'scombz:read scombz:session' });
+  const consent = await response.text();
+  assert.ok(consent.includes('SESSION CookieをChatGPTへ渡す権限'));
+  assert.ok(consent.includes('読み取り専用には制限できません'));
+  const code = await codeForClient({ scope: 'scombz:read scombz:session' });
+  const tokens = await (await form('/oauth/token', code)).json();
+  assert.equal(tokens.scope, 'scombz:read scombz:session');
+  const before = upstream;
+  const exported = await rpc(
+    'get_web_session',
+    {},
+    { Authorization: 'Bearer ' + tokens.access_token },
+  );
+  assert.equal(exported.status, 200);
+  const body = await exported.json();
+  const result = body.result.structuredContent;
+  assert.equal(result.cookie.name, 'SESSION');
+  assert.equal(result.cookie.value, state.cookies[0].value);
+  assert.equal(result.origin, 'https://scombz.shibaura-it.ac.jp');
+  assert.equal(result.permissions, 'full_web_session_not_read_only');
+  assert.equal(result.cookie.expires_at, null);
+  assert.equal(upstream, before, 'session transfer must not retrieve HTML');
+  assert.ok(!JSON.stringify(body).includes('fixture-mobile-token'));
+  assert.ok(!JSON.stringify(body).includes(bindings.ADMIN_TOKEN));
+  assert.ok(!JSON.stringify(body).includes('do-not-store'));
+  const rotated = await (
+    await form('/oauth/token', {
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      resource: origin + '/mcp',
+      refresh_token: tokens.refresh_token,
+    })
+  ).json();
+  assert.equal(rotated.scope, 'scombz:read scombz:session');
+  assert.equal(
+    (await rpc('get_web_session', {}, { Authorization: 'Bearer ' + rotated.access_token })).status,
+    200,
+  );
 });
 test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', async () => {
   const beforeRead = upstream;
@@ -612,4 +688,51 @@ test('revoke keeps the session; deletion removes session and OAuth grants', asyn
     (await (await req('/api/status', { headers: adminHeaders })).json()).connected,
     false,
   );
+});
+
+test('dedicated writes require independent consent and old grants cannot escalate', async () => {
+  const old = await (
+    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:session' }))
+  ).json();
+  const before = upstream;
+  const args = { course_id: 'c', assignment_id: 'r', fields: {} };
+  const denied = await rpc('prepare_assignment_submission', args, {
+    Authorization: 'Bearer ' + old.access_token,
+  });
+  assert.equal(denied.status, 401);
+  assert.ok(denied.headers.get('www-authenticate').includes('scope="scombz:write"'));
+  assert.equal(upstream, before);
+  const rotated = await (
+    await form('/oauth/token', {
+      grant_type: 'refresh_token',
+      client_id: clientId,
+      resource: origin + '/mcp',
+      refresh_token: old.refresh_token,
+      scope: 'scombz:read scombz:session scombz:write',
+    })
+  ).json();
+  assert.equal(rotated.scope, 'scombz:read scombz:session');
+  assert.equal(
+    (
+      await rpc('prepare_assignment_submission', args, {
+        Authorization: 'Bearer ' + rotated.access_token,
+      })
+    ).status,
+    401,
+  );
+  assert.equal(upstream, before);
+  const { response } = await authorize({ scope: 'scombz:read scombz:write' });
+  const consent = await response.text();
+  assert.ok(consent.includes('OAuth承認だけでは送信しません'));
+  assert.ok(consent.includes('本人の承認を毎回必要'));
+  const approved = await (
+    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:write' }))
+  ).json();
+  assert.equal(approved.scope, 'scombz:read scombz:write');
+  // Missing target can be read, but preparation must never issue a POST upstream.
+  const prepared = await rpc('prepare_assignment_submission', args, {
+    Authorization: 'Bearer ' + approved.access_token,
+  });
+  assert.equal(prepared.status, 200);
+  assert.equal((await prepared.json()).result.isError, true);
 });

@@ -3,6 +3,7 @@ import { BASE } from './parsers.mjs';
 import { ScombError } from './errors.mjs';
 import { random, encrypt, decrypt, digest, equalSecret } from './crypto.mjs';
 import { escape, htmlResponse, json } from './oauth.mjs';
+import { submissionForms } from './submission-adapters.mjs';
 
 const fail = (message) => {
   throw new ScombError('unsupported_write_form', message);
@@ -11,14 +12,26 @@ const fail = (message) => {
 // No caller-supplied URL, script execution, redirects, or generic HTTP tool.
 export function writeUrl(value, kind) {
   const u = new URL(value, BASE);
-  const prefix =
-    kind === 'assignment' ? '/lms/course/report/submission' : '/lms/course/examination/take';
+  const paths = {
+    assignment: ['/lms/course/report/upload', '/lms/course/report/submission'],
+    quiz: ['/lms/course/examination/take'],
+    survey: ['/lms/course/surveys/take', '/portal/surveys/take'],
+  };
   if (
     u.origin !== BASE ||
     u.username ||
     u.password ||
     u.hash ||
-    !new RegExp('^' + prefix + '(?:[a-z_]*|/[a-z_]+)$', 'i').test(u.pathname)
+    !paths[kind]?.includes(u.pathname) ||
+    (u.search &&
+      !(
+        kind === 'quiz' &&
+        u.pathname === '/lms/course/examination/take' &&
+        u.search === '?confirm'
+      ) &&
+      (u.pathname !== '/lms/course/report/upload' ||
+        [...u.searchParams.keys()].length !== 1 ||
+        !/^[A-Za-z0-9_-]{1,100}$/.test(u.searchParams.get('_cid') ?? '')))
   )
     fail('学生用の提出・解答経路を確認できません。原画面をご利用ください。');
   return u.href;
@@ -67,7 +80,16 @@ export function nativeForms(html, source, kind) {
       }
       const value = tag === 'textarea' ? el.text() : (el.attr('value') ?? '');
       if (type === 'hidden') {
-        if (/answer|response|comment|reporttext|contenttext/i.test(name)) unsupported = true;
+        if (
+          /answer|response|comment|reporttext|contenttext/i.test(name) &&
+          !/^!?answerDetail\[\d+\]\.(?:surveyNo(?:Sub)?|answerItem\[\d+\]\.answer)$/.test(name) &&
+          !/^answer\[\d+\]\.examinationNo$/.test(name) &&
+          !/^!answer\[\d+\]\.answerItem\[\d+\]\.answer$/.test(name) &&
+          !['answerStatus', 'reanswerFlag'].includes(name)
+        )
+          unsupported = true;
+        // Actual answers hidden on a final page cannot be silently replayed.
+        if (/^answerDetail.*\.answer$/.test(name)) unsupported = true;
         hidden.push([name, value]);
         return;
       }
@@ -131,30 +153,12 @@ export function validateValues(form, values) {
     if (field.required && field.type !== 'file' && !result.some(([n, v]) => n === field.name && v))
       fail('必須の回答がありません。');
   }
+  for (const group of form.required_groups ?? [])
+    if (!result.some(([n, v]) => group.includes(n) && v)) fail('必須の設問に回答がありません。');
+  for (const [name, value] of result)
+    if (name === 'creationTime' && !/^\d{1,6}$/.test(value))
+      fail('作成時間は0以上の整数（分）です。');
   return result;
-}
-export async function writeForm(client, courseId, contentId, kind) {
-  const course = await client.course(courseId);
-  const item = course.contents.find((x) => x.kind === kind && x.content_id === contentId);
-  if (!item) throw new ScombError('not_found', '科目一覧で提出先を確認できません。');
-  const route = item.routes.find((x) =>
-    new URL(x, BASE).pathname.endsWith(kind === 'assignment' ? '/submission' : '/taketop'),
-  );
-  if (!route) fail('現在利用できる提出画面がありません。');
-  const source = new URL(route, BASE).href;
-  const forms = nativeForms(await client.html(route), source, kind);
-  if (!forms.length)
-    fail(
-      '標準HTMLの送信フォームがありません。JavaScript専用画面は実画面を調査するまで送信できません。',
-    );
-  return {
-    course_id: courseId,
-    content_id: contentId,
-    kind,
-    title: item.title ?? item.name ?? contentId,
-    source_url: source,
-    forms,
-  };
 }
 export async function saveDraft(
   env,
@@ -204,8 +208,13 @@ export async function saveDraft(
   await env.DB.prepare('DELETE FROM write_drafts WHERE expires_at < ?')
     .bind(Math.floor(Date.now() / 1000))
     .run();
-  await env.DB.prepare('INSERT INTO write_drafts(id,data,expires_at) VALUES(?,?,?)')
-    .bind(id, await encrypt(env, JSON.stringify(data)), expires)
+  await env.DB.prepare('INSERT INTO write_drafts(id,data,expires_at,owner) VALUES(?,?,?,?)')
+    .bind(
+      id,
+      await encrypt(env, JSON.stringify(data)),
+      expires,
+      client.authentication ?? sessionHash,
+    )
     .run();
   return {
     draft_id: id,
@@ -233,11 +242,17 @@ export async function resumeDraft(env, client, id) {
   return { ...data, pending_id: id, forms: [data.form] };
 }
 export async function submissionStatus(env, client, id) {
-  await client.loadSession();
-  const row = await env.DB.prepare('SELECT state,expires_at,result FROM write_drafts WHERE id=?')
+  const session = await client.loadSession();
+  const row = await env.DB.prepare(
+    'SELECT state,expires_at,result,owner FROM write_drafts WHERE id=?',
+  )
     .bind(id)
     .first();
-  if (!row) throw new ScombError('not_found', '提出操作が見つかりません。');
+  if (
+    !row ||
+    row.owner !== (client.authentication ?? (await digest(JSON.stringify(session.cookies))))
+  )
+    throw new ScombError('not_found', '本人の提出操作が見つかりません。');
   return {
     draft_id: id,
     status: row.state,
@@ -311,7 +326,7 @@ export async function confirmWrite(request, env, client, id, origin) {
   if (!data.ready)
     throw new ScombError(
       'answers_required',
-      '問題への回答をprepare_submissionで準備してから、再度確認してください。',
+      '専用の回答準備ツールで今回の回答を設定してから、再度確認してください。',
     );
   await client.html('/portal/home');
   const session = await client.loadSession();
@@ -336,13 +351,26 @@ export async function confirmWrite(request, env, client, id, origin) {
   for (const [name, value] of [...data.form.hidden, ...data.entries]) body.append(name, value);
   if (data.button.name) body.append(data.button.name, data.button.value);
   const files = data.form.fields.filter((f) => f.type === 'file');
+  const uploaded = [];
   files.forEach((field, i) => {
     const selected = input
       .getAll('attachment_' + i)
       .filter((f) => typeof f !== 'string' && f.name && f.size);
     if (field.required && !selected.length) fail('必須ファイルがありません。');
     if (!field.multiple && selected.length > 1) fail('ファイル数を確認してください。');
-    for (const file of selected) body.append(field.name, file, file.name);
+    if (selected.length > 30) fail('添付は30個までです。');
+    for (const file of selected) {
+      if (!file.name || /[\r\n]/.test(file.name)) fail('ファイル名を確認してください。');
+      body.append(field.name, file, file.name);
+      if (data.form.phase === 'assignment_upload') {
+        const metadata = data.form.file_template.map(([name, value]) => [
+          name,
+          name === 'originalFileName' ? file.name : value,
+        ]);
+        for (const [name, value] of metadata) body.append(name, value);
+        uploaded.push({ name: file.name, bytes: file.size, metadata });
+      }
+    }
   });
   // Atomic one-shot claim BEFORE sending. Network errors never unlock or auto-retry.
   const claimed = await env.DB.prepare(
@@ -362,8 +390,12 @@ export async function confirmWrite(request, env, client, id, origin) {
         Cookie: session.cookies
           .filter(
             (c) =>
+              c.domain === new URL(BASE).hostname &&
               (c.expires < 0 || c.expires > Date.now() / 1000) &&
-              new URL(data.form.action).pathname.startsWith(c.path),
+              (new URL(data.form.action).pathname === c.path ||
+                new URL(data.form.action).pathname.startsWith(
+                  c.path.endsWith('/') ? c.path : c.path + '/',
+                )),
           )
           .map((c) => c.name + '=' + c.value)
           .join('; '),
@@ -388,11 +420,13 @@ export async function confirmWrite(request, env, client, id, origin) {
   await env.DB.prepare("UPDATE write_drafts SET state='sent',data='' WHERE id=?").bind(id).run();
   if (!response.ok) {
     await response.body?.cancel();
-    return json({
+    const result = {
       status: 'verification_required',
       http_status: response.status,
       message: 'ScombZの原画面で提出状況を確認してください。自動リダイレクト・再送は行いません。',
-    });
+    };
+    await recordResult(env, id, result);
+    return json(result);
   }
   let text = '';
   try {
@@ -418,12 +452,66 @@ export async function confirmWrite(request, env, client, id, origin) {
     }
     text = new TextDecoder().decode(bytes);
   } catch {
-    return json({
+    const result = {
       status: 'verification_required',
       message: '送信後の画面を確認できません。自動再送せず、ScombZで提出状況を確認してください。',
-    });
+    };
+    await recordResult(env, id, result);
+    return json(result);
   }
-  const forms = nativeForms(text, data.form.action, data.kind);
+  let forms = [];
+  let limitation = null;
+  if (data.form.phase === 'assignment_upload') {
+    let ids;
+    try {
+      ids = JSON.parse(text);
+    } catch {}
+    if (
+      !Array.isArray(ids) ||
+      ids.length !== uploaded.length ||
+      !ids.every((x) => /^(?:[1-9]\d*)$/.test(String(x)))
+    ) {
+      const result = {
+        status: 'verification_required',
+        message: 'アップロード結果を確認できません。確認画面への送信・自動再送は行いません。',
+      };
+      await recordResult(env, id, result);
+      return json(result);
+    }
+    const metadata = uploaded.flatMap((f, i) =>
+      f.metadata.map(([n, v]) => [
+        n,
+        n === 'fileId'
+          ? String(ids[i])
+          : ['originalFileName', 'fileName', 'comment'].includes(n)
+            ? v.replaceAll(',', '&sbquo;')
+            : v,
+      ]),
+    );
+    forms = [
+      {
+        action: BASE + '/lms/course/report/submission',
+        phase: 'assignment_preview',
+        hidden: [...data.form.hidden, ...data.entries, ...metadata],
+        fields: [],
+        buttons: [{ name: '', value: '', label: '課題の確認画面へ進む（まだ最終提出しない）' }],
+        context:
+          '今回の回答: ' +
+          JSON.stringify(data.entries) +
+          '\nアップロード済み添付: ' +
+          JSON.stringify(uploaded.map(({ name, bytes }) => ({ name, bytes }))),
+      },
+    ];
+  } else {
+    try {
+      forms = submissionForms(text, data.form.action, data, 'continuation');
+    } catch (error) {
+      limitation =
+        error.code === 'unsupported_write_form'
+          ? error.message
+          : '送信後の画面形式を確認できません。';
+    }
+  }
   if (forms.length) {
     // Never advance or finalize a multi-step submission without another approval.
     const next = await saveDraft(
@@ -436,28 +524,31 @@ export async function confirmWrite(request, env, client, id, origin) {
       origin,
       { allowIncomplete: true },
     );
-    await env.DB.prepare('UPDATE write_drafts SET result=? WHERE id=?')
-      .bind(
-        await encrypt(
-          env,
-          JSON.stringify({
-            next,
-            forms: forms.map(({ fields, buttons, context }) => ({ fields, buttons, context })),
-          }),
-        ),
-        id,
-      )
-      .run();
-    return json({
+    const result = {
       status: 'next_confirmation_required',
       next,
-      forms: forms.map(({ fields, buttons, context }) => ({ fields, buttons, context })),
+      forms: forms.map(({ fields, buttons, context, phase }) => ({
+        fields,
+        buttons,
+        context,
+        phase,
+      })),
       message: '次の画面への送信も別の承認が必要です。nextがない場合は原画面をご利用ください。',
-    });
+    };
+    await recordResult(env, id, result);
+    return json(result);
   }
-  return json({
+  const result = {
     status: 'verification_required',
+    limitation,
     message:
       'ScombZに1回送信しました。HTTP成功だけで提出完了とは判定しません。課題状況・小テスト結果を原画面で確認してください。',
-  });
+  };
+  await recordResult(env, id, result);
+  return json(result);
+}
+async function recordResult(env, id, result) {
+  await env.DB.prepare('UPDATE write_drafts SET result=? WHERE id=?')
+    .bind(await encrypt(env, JSON.stringify(result)), id)
+    .run();
 }

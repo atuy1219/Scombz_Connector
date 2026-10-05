@@ -92,24 +92,35 @@ async function clean(env) {
   await env.DB.batch([
     env.DB.prepare('DELETE FROM oauth_codes WHERE expires_at < ?').bind(now()),
     env.DB.prepare('DELETE FROM oauth_tokens WHERE expires_at < ?').bind(now()),
+    env.DB.prepare('DELETE FROM oauth_scopes WHERE expires_at < ?').bind(now()),
   ]);
 }
-async function issue(env, clientId, audience) {
+const supportedScopes = ['scombz:read', 'scombz:session', 'scombz:write'];
+const scopeList = (scope) => [
+  ...new Set(
+    String(scope ?? '')
+      .split(/\s+/)
+      .filter(Boolean),
+  ),
+];
+async function issue(env, clientId, audience, scope = 'scombz:read') {
   const access = random(),
     refresh = random();
   await env.DB.batch([
-    env.DB.prepare('INSERT INTO oauth_tokens VALUES(?,?,?,?,?)').bind(
+    env.DB.prepare(
+      'INSERT INTO oauth_tokens(hash,kind,client_id,resource,expires_at) VALUES(?,?,?,?,?)',
+    ).bind(await tokenHash(env, access), 'access', clientId, audience, now() + 3600),
+    env.DB.prepare(
+      'INSERT INTO oauth_tokens(hash,kind,client_id,resource,expires_at) VALUES(?,?,?,?,?)',
+    ).bind(await tokenHash(env, refresh), 'refresh', clientId, audience, now() + 30 * 86400),
+    env.DB.prepare('INSERT INTO oauth_scopes(hash,scope,expires_at) VALUES(?,?,?)').bind(
       await tokenHash(env, access),
-      'access',
-      clientId,
-      audience,
+      scope,
       now() + 3600,
     ),
-    env.DB.prepare('INSERT INTO oauth_tokens VALUES(?,?,?,?,?)').bind(
+    env.DB.prepare('INSERT INTO oauth_scopes(hash,scope,expires_at) VALUES(?,?,?)').bind(
       await tokenHash(env, refresh),
-      'refresh',
-      clientId,
-      audience,
+      scope,
       now() + 30 * 86400,
     ),
   ]);
@@ -118,25 +129,28 @@ async function issue(env, clientId, audience) {
     token_type: 'Bearer',
     expires_in: 3600,
     refresh_token: refresh,
-    scope: 'scombz:read',
+    scope,
   });
 }
 export const tokenHash = (env, token) => digest(token + env.SESSION_ENCRYPTION_KEY);
-export async function access(request, env, origin) {
+export async function access(request, env, origin, requiredScope = 'scombz:read') {
   if (!configured(env)) return false;
   const token = request.headers.get('authorization')?.match(/^Bearer ([\w-]{43})$/)?.[1];
   if (!token) return false;
-  return !!(await env.DB.prepare(
-    "SELECT hash FROM oauth_tokens WHERE hash=? AND kind='access' AND resource=? AND expires_at>?",
+  const row = await env.DB.prepare(
+    "SELECT COALESCE(s.scope,'scombz:read') AS scope FROM oauth_tokens t LEFT JOIN oauth_scopes s ON s.hash=t.hash WHERE t.hash=? AND t.kind='access' AND t.resource=? AND t.expires_at>?",
   )
     .bind(await tokenHash(env, token), resource(origin), now())
-    .first());
+    .first();
+  return !!row && scopeList(row.scope).includes(requiredScope);
 }
-export function challenge(origin) {
+export function challenge(origin, scope = 'scombz:read') {
   return (
     'Bearer resource_metadata="' +
     origin +
-    '/.well-known/oauth-protected-resource/mcp", scope="scombz:read"'
+    '/.well-known/oauth-protected-resource/mcp", scope="' +
+    scope +
+    '"'
   );
 }
 export async function oauth(request, env, origin) {
@@ -149,7 +163,7 @@ export async function oauth(request, env, origin) {
     return json({
       resource: resource(origin),
       authorization_servers: [origin],
-      scopes_supported: ['scombz:read'],
+      scopes_supported: supportedScopes,
       bearer_methods_supported: ['header'],
       resource_name: 'ScombZ Connector',
       resource_documentation: origin + '/',
@@ -164,7 +178,7 @@ export async function oauth(request, env, origin) {
       grant_types_supported: ['authorization_code', 'refresh_token'],
       code_challenge_methods_supported: ['S256'],
       token_endpoint_auth_methods_supported: ['none'],
-      scopes_supported: ['scombz:read'],
+      scopes_supported: supportedScopes,
     });
   if (!path.startsWith('/oauth/')) return null;
   if (!configured(env))
@@ -221,10 +235,16 @@ export async function oauth(request, env, origin) {
       return oauthError('invalid_request', 'S256 PKCEが必要です。');
     if (p.get('resource') !== resource(origin))
       return oauthError('invalid_target', 'resourceにこのサーバーの /mcp URLを指定してください。');
-    if ((p.get('scope') ?? 'scombz:read').split(' ').some((x) => x !== 'scombz:read'))
-      return oauthError('invalid_scope', 'scombz:read のみ対応しています。');
+    const scopes = scopeList(p.get('scope') ?? 'scombz:read');
+    if (!scopes.length || scopes.some((x) => !supportedScopes.includes(x)))
+      return oauthError(
+        'invalid_scope',
+        '対応するスコープはscombz:read、scombz:session、scombz:writeです。',
+      );
+    const scope = scopes.join(' ');
     const ticket = await sign(env, {
       kind: 'consent',
+      scope,
       exp: now() + 300,
       client_id: p.get('client_id'),
       redirect_uri: p.get('redirect_uri'),
@@ -233,7 +253,7 @@ export async function oauth(request, env, origin) {
       state: p.get('state') ?? '',
     });
     return htmlResponse(
-      `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ScombZへの接続を承認</title><style>body{font:16px system-ui;max-width:560px;margin:60px auto;padding:24px;line-height:1.8}input,button{font:inherit;padding:12px;width:100%;box-sizing:border-box;margin:10px 0}code{overflow-wrap:anywhere}</style><h1>ScombZへの接続を承認</h1><p>${escape(registration.name)} に、あなたの時間割・教材・課題等を読み取る権限を与えます。提出内容の下書きを準備できますが、ScombZへの書き込みは毎回別の確認画面で本人の承認が必要です。</p><p>戻り先: <code>${escape(new URL(p.get('redirect_uri')).origin)}</code></p><p>このWorkerの管理キーを入力してください。ScombZのパスワードは入力しません。</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${escape(ticket)}"><input name="admin_token" type="password" autocomplete="off" required aria-label="管理キー"><button>接続を承認</button></form></html>`,
+      `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ScombZへの接続を承認</title><style>body{font:16px system-ui;max-width:560px;margin:60px auto;padding:24px;line-height:1.8}input,button{font:inherit;padding:12px;width:100%;box-sizing:border-box;margin:10px 0}code{overflow-wrap:anywhere}</style><h1>ScombZへの接続を承認</h1><p>${escape(registration.name)} に、あなたの時間割・教材・課題等を読み取る権限を与えます。</p>${scopes.includes('scombz:write') ? '<p><strong>専用の課題提出・小テスト開始と回答・アンケート回答ツールの利用を許可します。</strong>OAuth承認だけでは送信しません。各操作は内容と添付を確認する専用画面で、管理キーによる本人の承認を毎回必要とします。アップロード・確認画面への送信・最終登録もそれぞれ別の承認です。</p>' : ''}${scopes.includes('scombz:session') ? '<p><strong>ScombZ WebのSESSION CookieをChatGPTへ渡す権限も許可します。</strong>受け取った側は本人としてScombZへ直接アクセスできます。Cookieには提出・受験などの権限も含まれ、読み取り専用には制限できません。書き込み前には毎回内容を確認してください。Cookieを会話の本文・共有ファイル・GitHubに掲載しないでください。</p>' : ''}<p>戻り先: <code>${escape(new URL(p.get('redirect_uri')).origin)}</code></p><p>このWorkerの管理キーを入力してください。ScombZのパスワードは入力しません。</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${escape(ticket)}"><input name="admin_token" type="password" autocomplete="off" required aria-label="管理キー"><button>接続を承認</button></form></html>`,
       p.get('redirect_uri'),
     );
   }
@@ -256,16 +276,23 @@ export async function oauth(request, env, origin) {
       );
     await clean(env);
     const code = random();
-    await env.DB.prepare('INSERT INTO oauth_codes VALUES(?,?,?,?,?,?)')
-      .bind(
+    await env.DB.batch([
+      env.DB.prepare(
+        'INSERT INTO oauth_codes(hash,client_id,redirect_uri,challenge,resource,expires_at) VALUES(?,?,?,?,?,?)',
+      ).bind(
         await digest(code),
         ticket.client_id,
         ticket.redirect_uri,
         ticket.challenge,
         ticket.resource,
         now() + 120,
-      )
-      .run();
+      ),
+      env.DB.prepare('INSERT INTO oauth_scopes(hash,scope,expires_at) VALUES(?,?,?)').bind(
+        await digest(code),
+        ticket.scope ?? 'scombz:read',
+        now() + 120,
+      ),
+    ]);
     const target = new URL(ticket.redirect_uri);
     target.searchParams.set('code', code);
     if (ticket.state) target.searchParams.set('state', ticket.state);
@@ -291,6 +318,7 @@ export async function oauth(request, env, origin) {
       return oauthError('invalid_client', 'クライアントを確認できません。');
     if (audience !== resource(origin))
       return oauthError('invalid_target', 'resourceを確認してください。');
+    let grantedScope;
     if (form.get('grant_type') === 'authorization_code') {
       const hash = await digest(form.get('code') ?? ''),
         row = await env.DB.prepare('SELECT * FROM oauth_codes WHERE hash=? AND expires_at>?')
@@ -306,9 +334,19 @@ export async function oauth(request, env, origin) {
         row.challenge !== (await digest(verifier))
       )
         return oauthError('invalid_grant', '認証コードまたはPKCEを確認できません。');
+      grantedScope =
+        (await env.DB.prepare('SELECT scope FROM oauth_scopes WHERE hash=?').bind(hash).first())
+          ?.scope ?? 'scombz:read';
       const result = await env.DB.prepare('DELETE FROM oauth_codes WHERE hash=?').bind(hash).run();
       if (!result.meta.changes) return oauthError('invalid_grant', '認証コードは使用済みです。');
     } else if (form.get('grant_type') === 'refresh_token') {
+      const refreshHash = await tokenHash(env, form.get('refresh_token') ?? '');
+      grantedScope =
+        (
+          await env.DB.prepare('SELECT scope FROM oauth_scopes WHERE hash=?')
+            .bind(refreshHash)
+            .first()
+        )?.scope ?? 'scombz:read';
       const result = await env.DB.prepare(
         "DELETE FROM oauth_tokens WHERE hash=? AND kind='refresh' AND client_id=? AND resource=? AND expires_at>? RETURNING hash",
       )
@@ -321,7 +359,7 @@ export async function oauth(request, env, origin) {
         'authorization_code または refresh_token を使用してください。',
       );
     await clean(env);
-    return issue(env, clientId, audience);
+    return issue(env, clientId, audience, grantedScope);
   }
   return oauthError(
     'invalid_request',
