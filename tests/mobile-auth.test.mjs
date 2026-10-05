@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MobileAuthClient } from '../src/mobile-auth.mjs';
+import { ScombClient } from '../src/client.mjs';
 
 class MemoryStore {
   constructor() {
@@ -128,4 +129,50 @@ test('expired Mobile API token is discarded', async () => {
   );
   await assert.rejects(() => client.getOtkey(), (error) => error.code === 'mobile_auth_required');
   assert.equal(store.value, null);
+});
+
+
+test('ScombClient refreshes a missing ScombZ web session through OTKEY automatically', async () => {
+  let stored = null;
+  let exchanges = 0;
+  const store = {
+    async load() {
+      return stored;
+    },
+    async save(value) {
+      stored = structuredClone(value);
+    },
+  };
+  const client = new ScombClient(
+    {},
+    {
+      store,
+      mobileClient: {
+        async exchangeOtkey() {
+          exchanges++;
+          return {
+            session: {
+              name: 'SESSION',
+              value: 'fresh-web-session',
+              domain: 'scombz.shibaura-it.ac.jp',
+              path: '/',
+              secure: true,
+              httpOnly: true,
+              expires: -1,
+            },
+          };
+        },
+      },
+      fetch: async (input, init = {}) => {
+        assert.equal(new URL(input).origin, 'https://scombz.shibaura-it.ac.jp');
+        assert.ok(init.headers.Cookie.includes('SESSION=fresh-web-session'));
+        return new Response('<html><div id="page_head"></div><div>home</div></html>');
+      },
+    },
+  );
+
+  const status = await client.connection();
+  assert.equal(status.connected, true);
+  assert.equal(exchanges, 1);
+  assert.equal(stored.cookies[0].value, 'fresh-web-session');
 });
