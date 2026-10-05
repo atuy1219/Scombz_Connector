@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MobileAuthClient } from '../src/mobile-auth.mjs';
 import { ScombClient } from '../src/client.mjs';
+import { ScombError } from '../src/errors.mjs';
 
 class MemoryStore {
   constructor() {
@@ -36,7 +37,11 @@ test('Mobile API login stores only the bearer token and OTKEY bridge yields SESS
       store,
       fetch: async (input, init = {}) => {
         const url = new URL(input);
-        seen.push({ url: url.href, method: init.method, authorization: init.headers?.Authorization });
+        seen.push({
+          url: url.href,
+          method: init.method,
+          authorization: init.headers?.Authorization,
+        });
         if (url.pathname.endsWith('/smob/api/login')) {
           assert.deepEqual(JSON.parse(init.body), { user: 'AL00000', pass: 'secret-password' });
           return json({ status: 'OK', token: 'mobile-bearer-token', user_type: 'student' });
@@ -114,7 +119,10 @@ test('OTKEY bridge never follows redirects outside ScombZ hosts', async () => {
 
   const exchanged = await client.exchangeOtkey();
   assert.equal(exchanged.session, null);
-  assert.equal(exchanged.diagnostics.some((x) => x.blocked === true), true);
+  assert.equal(
+    exchanged.diagnostics.some((x) => x.blocked === true),
+    true,
+  );
 });
 
 test('expired Mobile API token is discarded', async () => {
@@ -127,10 +135,12 @@ test('expired Mobile API token is discarded', async () => {
       fetch: async () => json({ message: 'expired' }, 401),
     },
   );
-  await assert.rejects(() => client.getOtkey(), (error) => error.code === 'mobile_auth_required');
+  await assert.rejects(
+    () => client.getOtkey(),
+    (error) => error.code === 'mobile_auth_required',
+  );
   assert.equal(store.value, null);
 });
-
 
 test('ScombClient refreshes a missing ScombZ web session through OTKEY automatically', async () => {
   let stored = null;
@@ -148,6 +158,9 @@ test('ScombClient refreshes a missing ScombZ web session through OTKEY automatic
     {
       store,
       mobileClient: {
+        async token() {
+          return 'fixture-root-token';
+        },
         async exchangeOtkey() {
           exchanges++;
           return {
@@ -175,4 +188,132 @@ test('ScombClient refreshes a missing ScombZ web session through OTKEY automatic
   assert.equal(status.connected, true);
   assert.equal(exchanges, 1);
   assert.equal(stored.cookies[0].value, 'fresh-web-session');
+});
+
+test('a cached SESSION cannot authenticate when the Mobile API bearer is missing', async () => {
+  let reads = 0;
+  const client = new ScombClient(
+    {},
+    {
+      store: {
+        async load() {
+          assert.fail('cache must not be read without root authentication');
+        },
+      },
+      mobileClient: {
+        async token() {
+          throw new ScombError('mobile_auth_required', 'missing bearer');
+        },
+      },
+      fetch: async () => {
+        reads++;
+        assert.fail('upstream must not be accessed');
+      },
+    },
+  );
+  const status = await client.connection();
+  assert.equal(status.connected, false);
+  assert.equal(status.reauthentication_required, true);
+  assert.equal(status.authenticated, false);
+  assert.equal(reads, 0);
+});
+
+test('bridge failure keeps bearer authentication and does not request re-login', async () => {
+  const client = new ScombClient(
+    {},
+    {
+      store: new MemoryStore(),
+      mobileClient: {
+        async token() {
+          return 'saved-bearer';
+        },
+        async exchangeOtkey() {
+          return { session: null };
+        },
+      },
+    },
+  );
+  const status = await client.connection();
+  assert.equal(status.code, 'web_session_unavailable');
+  assert.equal(status.authenticated, true);
+  assert.equal(status.reauthentication_required, false);
+});
+
+test('a persistent Web login page has a bounded retry and preserves root authentication', async () => {
+  let exchanges = 0;
+  const client = new ScombClient(
+    {},
+    {
+      store: new MemoryStore(),
+      mobileClient: {
+        async token() {
+          return 'saved-bearer';
+        },
+        async exchangeOtkey() {
+          exchanges++;
+          return {
+            session: {
+              name: 'SESSION',
+              value: 'cookie',
+              domain: 'scombz.shibaura-it.ac.jp',
+              path: '/',
+              secure: true,
+              expires: -1,
+            },
+          };
+        },
+      },
+      fetch: async () => new Response('<form id="loginForm"></form>'),
+    },
+  );
+  const status = await client.connection();
+  assert.equal(status.code, 'web_session_unavailable');
+  assert.equal(status.reauthentication_required, false);
+  assert.equal(exchanges, 2);
+});
+
+test('an expired Web SESSION is renewed once without losing the bearer', async () => {
+  const store = new MemoryStore();
+  store.value = {
+    cookies: [
+      {
+        name: 'SESSION',
+        value: 'expired',
+        domain: 'scombz.shibaura-it.ac.jp',
+        path: '/',
+        secure: true,
+        expires: -1,
+      },
+    ],
+    origins: [],
+  };
+  let exchanges = 0,
+    requests = 0;
+  const client = new ScombClient(
+    {},
+    {
+      store,
+      mobileClient: {
+        async token() {
+          return 'saved-bearer';
+        },
+        async exchangeOtkey() {
+          exchanges++;
+          return { session: { ...store.value.cookies[0], value: 'renewed' } };
+        },
+      },
+      fetch: async (input, init) => {
+        requests++;
+        if (init.headers.Cookie.includes('SESSION=expired'))
+          return new Response(null, { status: 401 });
+        assert.ok(init.headers.Cookie.includes('SESSION=renewed'));
+        return new Response('<div id="page_head"></div>');
+      },
+    },
+  );
+  const status = await client.connection();
+  assert.equal(status.connected, true);
+  assert.equal(status.reauthentication_required, false);
+  assert.equal(exchanges, 1);
+  assert.equal(requests, 2);
 });

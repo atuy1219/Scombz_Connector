@@ -37,10 +37,11 @@ Wranglerはデプロイ時に既存Secretを保持します。このプロジェ
 
 ## ScombZ認証
 
-ScombZ認証はWorkerの管理画面だけで完結します。学籍番号とパスワードはログイン要求中だけ公式ScombMobile APIへ送信し、WorkerのD1には保存しません。D1にはMobile APIのBearer tokenと、OTKEYから取得したScombZ WebセッションだけをAES-256-GCMで暗号化して保存します。
+認証の基準はMobile APIのBearer tokenです。学籍番号とパスワードは管理画面からのログイン要求中だけ公式ScombMobile APIへ送信し、保存しません。Bearerだけを長期保持し、OTKEYは必要なときに生成して保存しません。
 
-ScombZ Webセッションが期限切れになった場合、Connectorは保存済みMobile API認証から新しいOTKEYを取得し、Webセッションを自動更新して1回だけ処理を再試行します。Mobile API認証自体が期限切れになった場合は、`get_connection_status` が管理画面URLを返すので、そこから再ログインしてください。
+Web SESSIONはBearerに紐づくキャッシュとしてD1に暗号化保存し、最大6時間再利用します。期限内でもScombZ側の失効を検出したら、Bearer → OTKEY → SESSIONの経路で自動更新して再試行します。リクエストごとにOTKEYを生成しません。旧形式のSESSIONキャッシュは初回の利用時に自動更新します。
 
+Bearerの不在・失効が確認されたときだけ再ログインを案内します。通信障害やOTKEYからのSESSION生成失敗は接続障害として表示し、Bearerを削除しません。管理画面は接続状態・再ログイン・ChatGPT接続の解除を中心に表示し、接続済みならログインフォームを折りたたみます。ChatGPT接続の解除はScombZ認証を保持し、ScombZからのログアウトはBearerとSESSIONキャッシュを削除します。
 
 ## できること
 
@@ -84,10 +85,10 @@ python scripts/package-skill.py
 ## データと認証
 
 - WorkerとD1は利用者本人のCloudflareアカウントにあります。作者への転送・テレメトリーは実装していません。
-- D1にはMobile APIのBearer tokenとOTKEYから得たScombZ WebセッションをAES-256-GCMで暗号化して保存します。学籍番号・パスワードは保存しません。
+- D1には認証の基準となるBearerと、最大6時間のSESSIONキャッシュをAES-256-GCMで暗号化して保存します。学籍番号・パスワード・OTKEYは保存しません。
 - OAuthは `scombz:read` のみ。DCR、S256 PKCE、短期間の認証コード、1時間のアクセストークン、30日間の更新トークンのローテーションに対応します。
 - OAuthトークンはハッシュで保存し、`/mcp` のresource、期限、種別を検証します。管理キーでMCPを呼び出すことはできず、OAuthトークンで管理画面を操作することもできません。
-- 管理画面でOAuth接続の一括解除、セッション削除ができます。作者のChatGPTメールアドレスや `oai-authenticated-user-*` ヘッダーを認証に使いません。
+- 管理画面でOAuth接続の一括解除、ScombZからのログアウトができます。作者のChatGPTメールアドレスや `oai-authenticated-user-*` ヘッダーを認証に使いません。
 - DCRのリダイレクトは `https://chatgpt.com`・`https://chat.openai.com` とHTTPのlocalhost/ループバックのみ。その他のMCPクライアントを使う場合は、`src/oauth.mjs` の許可先を利用者が確認して変更します。
 
 ## 無料枠について

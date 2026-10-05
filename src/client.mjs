@@ -1,5 +1,6 @@
 import { SessionStore } from './storage.mjs';
 import { MobileAuthClient } from './mobile-auth.mjs';
+import { digest } from './crypto.mjs';
 import { ScombError } from './errors.mjs';
 import {
   BASE,
@@ -164,7 +165,9 @@ function boundedBody(response, maximum) {
           size += value.byteLength;
           if (size > maximum) {
             await reader.cancel().catch(() => {});
-            controller.error(new ScombError('file_too_large', 'ファイルが取得上限を超えています。'));
+            controller.error(
+              new ScombError('file_too_large', 'ファイルが取得上限を超えています。'),
+            );
             return;
           }
           controller.enqueue(value);
@@ -195,25 +198,52 @@ export class ScombClient {
           })
         : null);
   }
+  async authenticate() {
+    if (!this.mobile || this.authentication) return;
+    let token;
+    try {
+      token = await this.mobile.token();
+    } catch (error) {
+      if (error instanceof ScombError && error.code === 'mobile_auth_required')
+        throw new ScombError(
+          'auth_required',
+          'Mobile APIの認証がありません、または失効しています。管理画面から再ログインしてください。',
+        );
+      throw error;
+    }
+    this.authentication = await digest(token + (this.env.SESSION_ENCRYPTION_KEY ?? ''));
+    this.store?.bindAuthentication?.(this.authentication, this.mobile.store?.original);
+  }
   async refreshSession() {
+    await this.authenticate();
     if (!this.mobile || !this.store)
-      throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+      throw new ScombError(
+        'auth_required',
+        'ScombZへのログインが必要です。管理画面を開いてログインしてください。',
+      );
     let bridge;
     try {
       bridge = await this.mobile.exchangeOtkey();
     } catch (error) {
       if (error instanceof ScombError && error.code === 'mobile_auth_required')
-        throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+        throw new ScombError(
+          'auth_required',
+          'ScombZへのログインが必要です。管理画面を開いてログインしてください。',
+        );
       throw error;
     }
     if (!bridge.session)
-      throw new ScombError('auth_required', 'OTKEYからScombZセッションを取得できませんでした。管理画面から再ログインしてください。');
+      throw new ScombError(
+        'web_session_unavailable',
+        'Mobile APIの認証は保存されていますが、ScombZへの接続を準備できませんでした。時間をおいて接続を確認してください。',
+      );
     this.session = normalizeSession({ cookies: [bridge.session], origins: [] });
     await this.store.save(this.session, { replace: true });
     this.memory.clear();
     return this.session;
   }
   async loadSession() {
+    await this.authenticate();
     if (this.session) return this.session;
     const raw = await this.store?.load();
     if (raw) {
@@ -240,7 +270,10 @@ export class ScombClient {
         session = await this.refreshSession();
         return this.request(path, binary, false);
       }
-      throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+      throw new ScombError(
+        'web_session_unavailable',
+        'Webセッションを自動更新してもScombZへ接続できませんでした。時間をおいて接続を確認してください。',
+      );
     }
     let response;
     try {
@@ -269,7 +302,10 @@ export class ScombClient {
           await this.refreshSession();
           return this.request(path, binary, false);
         }
-        throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+        throw new ScombError(
+          'web_session_unavailable',
+          'Webセッションを自動更新してもScombZへ接続できませんでした。時間をおいて接続を確認してください。',
+        );
       }
       throw new ScombError(
         'redirect_blocked',
@@ -281,7 +317,10 @@ export class ScombClient {
         await this.refreshSession();
         return this.request(path, binary, false);
       }
-      throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+      throw new ScombError(
+        'web_session_unavailable',
+        'Webセッションを自動更新してもScombZへ接続できませんでした。時間をおいて接続を確認してください。',
+      );
     }
     if (!response.ok)
       throw new ScombError('upstream_error', `ScombZがHTTP ${response.status}を返しました。`);
@@ -304,14 +343,19 @@ export class ScombClient {
     }
     return response;
   }
-  async html(path) {
+  async html(path, allowRefresh = true) {
     if (this.memory.has(path)) return this.memory.get(path);
-    const response = await this.request(path);
+    const response = await this.request(path, false, allowRefresh);
     const html = new TextDecoder().decode(await readBounded(response, 3 * 1024 * 1024));
     const state = pageState(html);
     if (state.login) {
+      if (!allowRefresh)
+        throw new ScombError(
+          'web_session_unavailable',
+          'Webセッションの自動更新後もScombZへ接続できませんでした。時間をおいて接続を確認してください。',
+        );
       await this.refreshSession();
-      return this.html(path);
+      return this.html(path, false);
     }
     if (state.maintenance)
       throw new ScombError('temporarily_unavailable', 'ScombZの案内画面へ移動しています。');
@@ -380,10 +424,22 @@ export class ScombClient {
       return {
         connected: true,
         checked_at: new Date().toISOString(),
-        durable_session_storage: !!this.store,
+        authenticated: true,
+        auth_method: 'mobile_api_otkey',
+        web_session_storage: 'expiring_cache',
+        reauthentication_required: false,
       };
     } catch (error) {
-      return { connected: false, code: error.code ?? 'internal_error', message: error.message };
+      const reauthenticate = error.code === 'auth_required';
+      return {
+        connected: false,
+        authenticated: !reauthenticate && !!this.authentication,
+        auth_method: 'mobile_api_otkey',
+        web_session_storage: 'expiring_cache',
+        reauthentication_required: reauthenticate,
+        code: error.code ?? 'internal_error',
+        message: error.message,
+      };
     }
   }
   async detail(courseId, contentId, kind, view = 'auto') {
@@ -502,7 +558,10 @@ export class ScombClient {
       const bytes = await readBounded(response, 1024 * 1024);
       const state = pageState(new TextDecoder().decode(bytes));
       if (state.login)
-        throw new ScombError('auth_required', 'ファイル取得にはScombZへの再ログインが必要です。');
+        throw new ScombError(
+          'web_session_unavailable',
+          '教材ファイルを取得できませんでした。時間をおいて接続を確認してください。',
+        );
       if (state.header)
         throw new ScombError('unavailable', 'ファイルではなくScombZの案内画面が返りました。');
       throw new ScombError('unavailable', 'ファイルではなくHTMLが返りました。');
@@ -520,5 +579,4 @@ export class ScombClient {
     const { body, bytes } = boundedBody(response, MAX_FILE_BYTES);
     return { metadata, mime, body, bytes };
   }
-
 }

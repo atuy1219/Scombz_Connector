@@ -123,7 +123,7 @@ export async function handle(request, env, options = {}) {
         }
         const mobile = new MobileAuthClient(env, mobileOptions);
         const login = await mobile.login(body?.user, body?.password);
-        await client.refreshSession();
+        await env.DB.prepare('DELETE FROM session').run();
         const status = await client.connection();
         return json({ ...login, ...status, auth_method: 'mobile_api_otkey' });
       }

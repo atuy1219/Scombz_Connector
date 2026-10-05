@@ -9,7 +9,7 @@ ScombZ ConnectorのMCPツールを使って、本人のScombZに表示される�
 
 ## 取得の手順
 
-1. 必要に応じて`get_connection_status`で接続状態を確認する。`auth_required`の場合は結果の`management_url`または管理画面のresource linkを案内し、そこでScombZへログインしてもらう。学籍番号・パスワード・Cookie値を会話で求めない。認証は管理画面から公式Mobile APIへ行い、OTKEY経由でScombZ Webセッションを取得する。
+1. 必要に応じて`get_connection_status`で接続状態を確認する。`auth_required`の場合は結果の`management_url`または管理画面のresource linkを案内し、そこでScombZへログインしてもらう。学籍番号・パスワード・Cookie値を会話で求めない。認証の基準は保存済みMobile API Bearerで、Web SESSIONは期限付きキャッシュとしてOTKEYで自動更新する。`reauthentication_required`がtrueまたは`auth_required`の場合だけ再ログインを案内する。通信障害・`web_session_unavailable`ではBearerを失効と扱わず、時間をおいて接続を確認するよう案内する。
 2. `list_academic_terms`で本人が選択できる年度を確認し、`list_courses(year, semester)`で対象期の時間割と科目IDを取得する。同じ科目が複数時限に現れるので、コンテンツを取得する際は`course_id`で重複排除する。
 3. `list_course_contents(course_id)`で教材、課題、小テスト、アンケートのIDと表示状態を調べる。過去期の項目もこのツールで取得する。`list_current_tasks`は現在のタスク一覧だけで、過去期や提出済みの全件を含むとは限らない。
 4. 課題は`get_assignment`、小テストは`get_quiz`、アンケートは`get_survey`で内容を読む。大学全体のアンケートは`list_surveys`で一覧を調べ、`get_survey`の`course_id`を省略する。`auto`は公開済み結果を優先する。未受験の問題文が要項にない場合は「受験を開始しないと取得できない」と説明する。
@@ -28,4 +28,4 @@ ScombZ ConnectorのMCPツールを使って、本人のScombZに表示される�
 
 受験開始、再受験、一時保存、課題提出、アンケート回答送信、出席送信、通知削除のツールは存在しない。別のHTTPリクエストやブラウザ操作でこれらを代行しない。小テストは要項・公開済み結果のみ取得し、`/examination/take`へ遷移しない。
 
-接続ページは利用者自身のWorkerトップにあり、管理キーで開く。そこでScombZへログインすると、公式Mobile APIのBearer tokenとOTKEYから得たScombZ WebセッションをD1へ暗号化保存する。ScombZセッション切れは保存済みMobile API認証からOTKEYを取得して自動更新する。ChatGPTには利用者自身の /mcp URLをOAuth（DCR）で登録する。管理キー、学籍番号、パスワード、Cookie値は会話で求めず、Workerの管理画面で扱う。
+接続ページは利用者自身のWorkerトップにあり、管理キーで開く。そこでScombZへログインすると、公式Mobile APIのBearer tokenをD1へ暗号化保存する。Web SESSIONはそのBearerに紐づく最大6時間の暗号化キャッシュとして再利用し、不在・期限切れ・Web側の失効時だけOTKEYで自動発行する。パスワードとOTKEYは保存しない。ChatGPT接続の解除はBearerを保持し、ScombZからのログアウトはBearerとSESSIONキャッシュを削除する。ChatGPTには利用者自身の /mcp URLをOAuth（DCR）で登録する。管理キー、学籍番号、パスワード、Cookie値は会話で求めず、Workerの管理画面で扱う。

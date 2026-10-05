@@ -5,6 +5,8 @@ import { Miniflare } from 'miniflare';
 import { readFile } from 'node:fs/promises';
 import { digest, random, sign } from '../src/crypto.mjs';
 import { SessionStore } from '../src/storage.mjs';
+import { MobileAuthStore } from '../src/mobile-auth.mjs';
+import { ScombClient } from '../src/client.mjs';
 
 const origin = 'https://fixture.workers.dev';
 const bindings = {
@@ -131,10 +133,16 @@ before(async () => {
     const migration = await readFile('migrations/' + name, 'utf8');
     await db.exec(migration.replaceAll('\n', ' '));
   }
-  await new SessionStore({ ...bindings, DB: db }).save(
-    { cookies: state.cookies.slice(0, 1), origins: [] },
-    { replace: true },
+  const env = { ...bindings, DB: db };
+  const auth = new MobileAuthStore(env);
+  await auth.save({ token: 'fixture-mobile-token' });
+  await auth.load();
+  const cache = new SessionStore(env);
+  cache.bindAuthentication(
+    await digest('fixture-mobile-token' + bindings.SESSION_ENCRYPTION_KEY),
+    auth.original,
   );
+  await cache.save({ cookies: state.cookies.slice(0, 1), origins: [] }, { replace: true });
 });
 after(async () => {
   await mf?.dispose();
@@ -152,7 +160,8 @@ test('runtime health, script CSP and OAuth discovery require no personal data', 
   const uiText = await ui.text();
   assert.ok(!uiText.includes('chatgpt.site'));
   assert.ok(!uiText.includes('session.json'));
-  assert.ok(uiText.includes('ScombZログイン'));
+  assert.ok(uiText.includes('再ログイン'));
+  assert.ok(uiText.includes('id="login-form"'));
   const meta = await (await req('/.well-known/oauth-protected-resource/mcp')).json();
   assert.equal(meta.resource, origin + '/mcp');
   assert.deepEqual(meta.authorization_servers, [origin]);
@@ -210,8 +219,73 @@ test('a stale request cannot overwrite a newly registered session', async () => 
   await stale.save(original);
   const restored = new SessionStore(env);
   assert.equal((await restored.load()).cookies[0].value, 'newer-cookie');
+  const auth = new MobileAuthStore(env);
+  await auth.load();
+  restored.bindAuthentication(
+    await digest('fixture-mobile-token' + bindings.SESSION_ENCRYPTION_KEY),
+    auth.original,
+  );
   await restored.save({ cookies: state.cookies.slice(0, 1), origins: [] }, { replace: true });
 });
+test('SESSION cache expires, is reused across clients, and is bound to the bearer', async () => {
+  const env = { ...bindings, DB: db };
+  const auth = new MobileAuthStore(env);
+  await auth.load();
+  const generation = await digest('fixture-mobile-token' + bindings.SESSION_ENCRYPTION_KEY);
+  const cache = new SessionStore(env);
+  const old = await cache.load();
+  await cache.save({ ...old, cache_expires_at: 1 }, { replace: true });
+  const expired = new SessionStore(env);
+  expired.bindAuthentication(generation, auth.original);
+  assert.equal(await expired.load(), null);
+  let exchanges = 0;
+  const mobile = {
+    store: auth,
+    async token() {
+      return (await auth.load()).token;
+    },
+    async exchangeOtkey() {
+      exchanges++;
+      return { session: state.cookies[0] };
+    },
+  };
+  const options = { mobileClient: mobile, fetch: async () => new Response(page('home')) };
+  assert.equal((await new ScombClient(env, options).connection()).connected, true);
+  assert.equal((await new ScombClient(env, options).connection()).connected, true);
+  assert.equal(exchanges, 1);
+  const wrongAuth = new SessionStore(env);
+  wrongAuth.bindAuthentication('another-bearer-generation', auth.original);
+  assert.equal(await wrongAuth.load(), null);
+  const live = new SessionStore(env);
+  live.bindAuthentication(generation, auth.original);
+  assert.ok((await live.load()).cache_expires_at > Date.now() / 1000);
+});
+
+test('stale refreshes and token failures cannot undo logout or overwrite a new login', async () => {
+  const env = { ...bindings, DB: db };
+  const staleAuth = new MobileAuthStore(env);
+  await staleAuth.load();
+  const staleCache = new SessionStore(env);
+  staleCache.bindAuthentication(
+    await digest('fixture-mobile-token' + bindings.SESSION_ENCRYPTION_KEY),
+    staleAuth.original,
+  );
+  const session = await staleCache.load();
+  await db.batch([db.prepare('DELETE FROM session'), db.prepare('DELETE FROM mobile_auth')]);
+  await staleCache.save(session, { replace: true });
+  assert.equal(await db.prepare('SELECT id FROM session').first(), null);
+  const fresh = new MobileAuthStore(env);
+  await fresh.save({ token: 'fixture-mobile-token' });
+  await staleAuth.clear({ onlyLoaded: true });
+  assert.equal((await fresh.load()).token, 'fixture-mobile-token');
+  const cache = new SessionStore(env);
+  cache.bindAuthentication(
+    await digest('fixture-mobile-token' + bindings.SESSION_ENCRYPTION_KEY),
+    fresh.original,
+  );
+  await cache.save({ cookies: state.cookies.slice(0, 1), origins: [] }, { replace: true });
+});
+
 test('stateless DCR refuses foreign/injected redirects and confidential clients', async () => {
   for (const uri of [
     'https://evil.example/callback',

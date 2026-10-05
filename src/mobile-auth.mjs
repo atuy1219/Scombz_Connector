@@ -42,7 +42,8 @@ function cookieFrom(response) {
     const maxAge = line.match(/;\s*max-age=(-?\d+)/i);
     const expiry = line.match(/;\s*expires=([^;]+)/i);
     if (maxAge) expires = Date.now() / 1000 + Number(maxAge[1]);
-    else if (expiry && Number.isFinite(Date.parse(expiry[1]))) expires = Date.parse(expiry[1]) / 1000;
+    else if (expiry && Number.isFinite(Date.parse(expiry[1])))
+      expires = Date.parse(expiry[1]) / 1000;
     return {
       name: 'SESSION',
       value: match[1],
@@ -73,6 +74,7 @@ export class MobileAuthStore {
   }
   async load() {
     const row = await this.env.DB.prepare('SELECT data FROM mobile_auth WHERE id=1').first();
+    this.original = row?.data ?? null;
     if (!row) return null;
     return JSON.parse(await decrypt(this.env, row.data));
   }
@@ -84,7 +86,17 @@ export class MobileAuthStore {
       .bind(encrypted, new Date().toISOString())
       .run();
   }
-  async clear() {
+  async clear({ onlyLoaded = false } = {}) {
+    if (onlyLoaded) {
+      if (this.original)
+        await this.env.DB.batch([
+          this.env.DB.prepare(
+            'DELETE FROM session WHERE EXISTS(SELECT 1 FROM mobile_auth WHERE id=1 AND data=?)',
+          ).bind(this.original),
+          this.env.DB.prepare('DELETE FROM mobile_auth WHERE id=1 AND data=?').bind(this.original),
+        ]);
+      return;
+    }
     await this.env.DB.prepare('DELETE FROM mobile_auth WHERE id=1').run();
   }
   async exists() {
@@ -122,10 +134,16 @@ export class MobileAuthClient {
     if (response.status === 401 || response.status === 403)
       throw new ScombError('mobile_auth_failed', 'Mobile APIの認証に失敗しました。');
     if (!response.ok)
-      throw new ScombError('mobile_upstream_error', `Mobile APIがHTTP ${response.status}を返しました。`);
+      throw new ScombError(
+        'mobile_upstream_error',
+        `Mobile APIがHTTP ${response.status}を返しました。`,
+      );
     const body = await readJson(response);
     if (body?.status !== 'OK' || !validSecret(body?.token))
-      throw new ScombError('mobile_auth_failed', 'Mobile APIから有効なトークンを取得できませんでした。');
+      throw new ScombError(
+        'mobile_auth_failed',
+        'Mobile APIから有効なトークンを取得できませんでした。',
+      );
     await this.store.save({ token: body.token });
     return {
       authenticated: true,
@@ -158,11 +176,14 @@ export class MobileAuthClient {
       throw new ScombError('temporarily_unavailable', 'Mobile APIへの接続に失敗しました。');
     }
     if (response.status === 401 || response.status === 403) {
-      await this.store.clear();
+      await this.store.clear({ onlyLoaded: true });
       throw new ScombError('mobile_auth_required', 'Mobile APIの認証期限が切れています。');
     }
     if (!response.ok)
-      throw new ScombError('mobile_upstream_error', `Mobile APIがHTTP ${response.status}を返しました。`);
+      throw new ScombError(
+        'mobile_upstream_error',
+        `Mobile APIがHTTP ${response.status}を返しました。`,
+      );
     return readJson(response);
   }
   async getOtkey() {
@@ -186,7 +207,9 @@ export class MobileAuthClient {
     try {
       const rows = await this.apiGet(`timetable/${year}${term}`);
       const course = Array.isArray(rows)
-        ? rows.find((row) => typeof row?.classId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(row.classId))
+        ? rows.find(
+            (row) => typeof row?.classId === 'string' && /^[A-Za-z0-9_-]{1,100}$/.test(row.classId),
+          )
         : null;
       return course ? '/lms/course?idnumber=' + encodeURIComponent(course.classId) : null;
     } catch (error) {
@@ -207,7 +230,10 @@ export class MobileAuthClient {
       );
       for (let hop = 0; hop < 6; hop++) {
         if (!ALLOWED_BRIDGE_HOSTS.has(current.host))
-          throw new ScombError('otkey_redirect_blocked', 'OTKEY経路が許可していないホストへ遷移しました。');
+          throw new ScombError(
+            'otkey_redirect_blocked',
+            'OTKEY経路が許可していないホストへ遷移しました。',
+          );
         let response;
         try {
           response = await this.fetch(current, {
@@ -230,7 +256,8 @@ export class MobileAuthClient {
         for (const line of setCookies) {
           const pair = line.split(';', 1)[0];
           const index = pair.indexOf('=');
-          if (index > 0 && validSecret(pair.slice(index + 1))) cookieJar.set(pair.slice(0, index), pair.slice(index + 1));
+          if (index > 0 && validSecret(pair.slice(index + 1)))
+            cookieJar.set(pair.slice(0, index), pair.slice(index + 1));
         }
         const session = cookieFrom(response);
         const redirect = safeRedirect(response.headers.get('location'), current);
