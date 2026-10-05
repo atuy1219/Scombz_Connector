@@ -104,8 +104,14 @@ before(async () => {
     },
   });
   db = await mf.getD1Database('DB');
-  const migration = await readFile('migrations/0001_initial.sql', 'utf8');
-  await db.exec(migration.replaceAll('\n', ' '));
+  for (const name of ['0001_initial.sql', '0002_mobile_auth.sql']) {
+    const migration = await readFile('migrations/' + name, 'utf8');
+    await db.exec(migration.replaceAll('\n', ' '));
+  }
+  await new SessionStore({ ...bindings, DB: db }).save(
+    { cookies: state.cookies.slice(0, 1), origins: [] },
+    { replace: true },
+  );
 });
 after(async () => {
   await mf?.dispose();
@@ -120,10 +126,14 @@ test('runtime health, script CSP and OAuth discovery require no personal data', 
   const ui = await req('/');
   assert.equal(ui.status, 200);
   assert.ok(ui.headers.get('content-security-policy').includes("script-src 'self';"));
-  assert.ok(!(await ui.text()).includes('chatgpt.site'));
+  const uiText = await ui.text();
+  assert.ok(!uiText.includes('chatgpt.site'));
+  assert.ok(!uiText.includes('session.json'));
+  assert.ok(uiText.includes('ScombZログイン'));
   const meta = await (await req('/.well-known/oauth-protected-resource/mcp')).json();
   assert.equal(meta.resource, origin + '/mcp');
   assert.deepEqual(meta.authorization_servers, [origin]);
+  assert.equal(meta.resource_documentation, origin + '/');
   const auth = await (await req('/.well-known/oauth-authorization-server')).json();
   assert.deepEqual(auth.code_challenge_methods_supported, ['S256']);
   assert.equal(upstream, 0);
@@ -133,46 +143,35 @@ test('admin routes reject forged identity, bearer access and missing Origin', as
     {},
     { 'oai-authenticated-user-id': 'owner', 'oai-authenticated-user-email': 'owner@example.test' },
   ])
-    assert.equal((await post('/api/connection', state, headers)).status, 401);
+    assert.equal((await req('/api/mobile', { method: 'DELETE', headers })).status, 401);
   assert.equal(
-    (await post('/api/connection', state, { Authorization: adminHeaders.Authorization })).status,
+    (
+      await req('/api/mobile', {
+        method: 'DELETE',
+        headers: { Authorization: adminHeaders.Authorization },
+      })
+    ).status,
     403,
   );
   assert.equal(
-    (await post('/api/connection', state, { ...adminHeaders, Origin: 'https://evil.example' }))
-      .status,
+    (
+      await req('/api/mobile', {
+        method: 'DELETE',
+        headers: { ...adminHeaders, Origin: 'https://evil.example' },
+      })
+    ).status,
     403,
   );
   assert.equal(upstream, 0);
 });
-test('session registration verifies ScombZ and stores only encrypted ScombZ Cookies', async () => {
-  const response = await post('/api/connection', state, adminHeaders);
-  assert.equal(response.status, 200);
-  assert.equal((await response.json()).connected, true);
-  const row = await db.prepare('SELECT * FROM session').first();
-  assert.ok(row.data.includes('"v":1'));
-  for (const privateValue of ['private-fixture-cookie', 'do-not-store', 'never-store'])
-    assert.ok(!row.data.includes(privateValue));
-  assert.equal(
-    (await (await req('/api/status', { headers: adminHeaders })).json()).connected,
-    true,
-  );
-  assert.equal(
-    (await db.prepare('SELECT data FROM session').first()).data,
-    row.data,
-    'unchanged Cookies must not rewrite D1',
-  );
-});
-test('failed session replacement preserves the stored session', async () => {
+
+test('legacy session.json upload API is removed without changing stored session', async () => {
   const previous = (await db.prepare('SELECT data FROM session').first()).data;
-  upstreamMode = 'redirect';
-  try {
-    assert.equal((await post('/api/connection', state, adminHeaders)).status, 401);
-  } finally {
-    upstreamMode = 'ok';
-  }
+  const response = await post('/api/connection', state, adminHeaders);
+  assert.equal(response.status, 404);
   assert.equal((await db.prepare('SELECT data FROM session').first()).data, previous);
 });
+
 test('a stale request cannot overwrite a newly registered session', async () => {
   const env = { ...bindings, DB: db };
   const stale = new SessionStore(env),
@@ -304,7 +303,12 @@ test('PKCE exchange, code replay prevention and private MCP work in workerd', as
   );
   const status = await rpc('get_connection_status', {}, { Authorization: 'Bearer ' + accessToken });
   assert.equal(status.status, 200);
-  assert.equal((await status.json()).result.structuredContent.connected, true);
+  const statusBody = await status.json();
+  assert.equal(statusBody.result.structuredContent.connected, true);
+  assert.equal(statusBody.result.structuredContent.management_url, origin + '/');
+  const managementLink = statusBody.result.content.find((x) => x.type === 'resource_link');
+  assert.equal(managementLink.uri, origin + '/');
+  assert.equal(managementLink.mimeType, 'text/html');
   assert.equal(
     (await req('/api/status', { headers: { Authorization: 'Bearer ' + accessToken } })).status,
     401,
@@ -320,12 +324,19 @@ test('read_file returns a temporary scoped link and streams PDF only when downlo
     { Authorization: 'Bearer ' + accessToken },
   );
   assert.equal(response.status, 200);
-  const value = (await response.json()).result.structuredContent;
+  const payload = await response.json();
+  const value = payload.result.structuredContent;
   assert.equal(value.format, 'pdf');
   assert.equal(value.text, null);
   assert.equal(value.bytes, null);
   assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
   assert.equal(value.retention, 'not_stored_by_connector');
+  assert.equal(value.delivery, 'mcp_resource_link');
+  const resourceLink = payload.result.content.find((x) => x.type === 'resource_link');
+  assert.ok(resourceLink);
+  assert.equal(resourceLink.uri, value.download_url);
+  assert.equal(resourceLink.name, 'first.pdf');
+  assert.equal(resourceLink.mimeType, 'application/pdf');
   assert.equal(upstream, beforeRead + 1, 'read_file must not download the PDF body');
   assert.ok(value.download_url);
   assert.ok(!value.download_url.includes('private-fixture-cookie'));
@@ -434,6 +445,7 @@ test('revoke keeps the session; deletion removes session and OAuth grants', asyn
     200,
   );
   assert.equal(await db.prepare('SELECT id FROM session').first(), null);
+  assert.equal(await db.prepare('SELECT id FROM mobile_auth').first(), null);
   assert.equal(
     (await (await req('/api/status', { headers: adminHeaders })).json()).connected,
     false,
