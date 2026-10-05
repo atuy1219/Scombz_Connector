@@ -1,5 +1,5 @@
 import { encrypt, decrypt } from './crypto.mjs';
-import { ScombError } from './client.mjs';
+import { ScombError } from './errors.mjs';
 
 export const MOBILE_API_BASE = 'https://smob.sic.shibaura-it.ac.jp/smob/api/';
 export const MOBILE_WEB_HOST = 'mobile.scombz.shibaura-it.ac.jp';
@@ -112,7 +112,7 @@ export class MobileAuthClient {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          'User-Agent': 'ScombZ-Connector/otkey-debug',
+          'User-Agent': 'ScombZ-Connector/otkey',
         },
         body: JSON.stringify({ user: user.trim(), pass: password }),
       });
@@ -151,7 +151,7 @@ export class MobileAuthClient {
         headers: {
           Accept: 'application/json',
           Authorization: 'Bearer ' + token,
-          'User-Agent': 'ScombZ-Connector/otkey-debug',
+          'User-Agent': 'ScombZ-Connector/otkey',
         },
       });
     } catch {
