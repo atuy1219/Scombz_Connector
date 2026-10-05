@@ -129,7 +129,7 @@ before(async () => {
     },
   });
   db = await mf.getD1Database('DB');
-  for (const name of ['0001_initial.sql', '0002_mobile_auth.sql']) {
+  for (const name of ['0001_initial.sql', '0002_mobile_auth.sql', '0003_write_drafts.sql']) {
     const migration = await readFile('migrations/' + name, 'utf8');
     await db.exec(migration.replaceAll('\n', ' '));
   }
@@ -198,6 +198,21 @@ test('admin routes reject forged identity, bearer access and missing Origin', as
     403,
   );
   assert.equal(upstream, 0);
+});
+
+test('write confirmation hides answers and returns controlled errors for invalid drafts', async () => {
+  const path = '/write/' + 'A'.repeat(43);
+  const page = await req(path);
+  assert.equal(page.status, 200);
+  assert.ok((await page.text()).includes('まだ送信しません'));
+  const body = new URLSearchParams({ admin_token: bindings.ADMIN_TOKEN, step: 'review' });
+  const response = await req(path, {
+    method: 'POST',
+    headers: { Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body,
+  });
+  assert.equal(response.status, 422);
+  assert.equal((await response.json()).code, 'draft_unavailable');
 });
 
 test('legacy session.json upload API is removed without changing stored session', async () => {

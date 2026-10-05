@@ -2,6 +2,7 @@ import { ScombClient, ScombError } from './client.mjs';
 import { MobileAuthClient, MobileAuthStore } from './mobile-auth.mjs';
 import { mcpResponse } from './mcp.mjs';
 import { html, script } from './ui.mjs';
+import { confirmationPage, confirmWrite } from './writes.mjs';
 import { configured, verify } from './crypto.mjs';
 import { oauth, admin, access, challenge, json, htmlResponse, readBody } from './oauth.mjs';
 
@@ -39,6 +40,13 @@ export async function handle(request, env, options = {}) {
         version: '1.0.0',
         configured: configured(env),
       });
+    const writeId = url.pathname.match(/^\/write\/([A-Za-z0-9_-]{43})$/)?.[1];
+    if (writeId && configured(env)) {
+      if (request.method === 'GET') return confirmationPage(writeId);
+      if (request.method === 'POST')
+        return await confirmWrite(request, env, new ScombClient(env, options), writeId, origin);
+      return json({ message: 'Method not allowed' }, 405);
+    }
     if (url.pathname === '/mcp') {
       if (request.method !== 'POST')
         return json({ message: 'POST /mcp を使用してください。' }, 405, {
@@ -123,7 +131,10 @@ export async function handle(request, env, options = {}) {
         }
         const mobile = new MobileAuthClient(env, mobileOptions);
         const login = await mobile.login(body?.user, body?.password);
-        await env.DB.prepare('DELETE FROM session').run();
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM session'),
+          env.DB.prepare('DELETE FROM write_drafts'),
+        ]);
         const status = await client.connection();
         return json({ ...login, ...status, auth_method: 'mobile_api_otkey' });
       }
@@ -131,7 +142,10 @@ export async function handle(request, env, options = {}) {
         if (request.headers.get('origin') !== origin)
           return json({ message: 'この管理画面から操作してください。' }, 403);
         await new MobileAuthStore(env).clear();
-        await env.DB.prepare('DELETE FROM session').run();
+        await env.DB.batch([
+          env.DB.prepare('DELETE FROM session'),
+          env.DB.prepare('DELETE FROM write_drafts'),
+        ]);
         return json({ deleted: true, connected: false });
       }
       if (url.pathname === '/api/status' && request.method === 'GET')
@@ -142,6 +156,7 @@ export async function handle(request, env, options = {}) {
         await env.DB.batch([
           env.DB.prepare('DELETE FROM session'),
           env.DB.prepare('DELETE FROM mobile_auth'),
+          env.DB.prepare('DELETE FROM write_drafts'),
           env.DB.prepare('DELETE FROM oauth_codes'),
           env.DB.prepare('DELETE FROM oauth_tokens'),
         ]);
@@ -151,6 +166,7 @@ export async function handle(request, env, options = {}) {
         if (request.headers.get('origin') !== origin)
           return json({ message: 'この管理画面から操作してください。' }, 403);
         await env.DB.batch([
+          env.DB.prepare('DELETE FROM write_drafts'),
           env.DB.prepare('DELETE FROM oauth_codes'),
           env.DB.prepare('DELETE FROM oauth_tokens'),
         ]);
