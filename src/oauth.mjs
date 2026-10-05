@@ -95,7 +95,7 @@ async function clean(env) {
     env.DB.prepare('DELETE FROM oauth_scopes WHERE expires_at < ?').bind(now()),
   ]);
 }
-const supportedScopes = ['scombz:read', 'scombz:session', 'scombz:write'];
+const supportedScopes = ['scombz:read', 'scombz:session'];
 const scopeList = (scope) => [
   ...new Set(
     String(scope ?? '')
@@ -237,10 +237,7 @@ export async function oauth(request, env, origin) {
       return oauthError('invalid_target', 'resourceにこのサーバーの /mcp URLを指定してください。');
     const scopes = scopeList(p.get('scope') ?? 'scombz:read');
     if (!scopes.length || scopes.some((x) => !supportedScopes.includes(x)))
-      return oauthError(
-        'invalid_scope',
-        '対応するスコープはscombz:read、scombz:session、scombz:writeです。',
-      );
+      return oauthError('invalid_scope', 'scombz:read と scombz:session のみ対応しています。');
     const scope = scopes.join(' ');
     const ticket = await sign(env, {
       kind: 'consent',
@@ -253,7 +250,7 @@ export async function oauth(request, env, origin) {
       state: p.get('state') ?? '',
     });
     return htmlResponse(
-      `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ScombZへの接続を承認</title><style>body{font:16px system-ui;max-width:560px;margin:60px auto;padding:24px;line-height:1.8}input,button{font:inherit;padding:12px;width:100%;box-sizing:border-box;margin:10px 0}code{overflow-wrap:anywhere}</style><h1>ScombZへの接続を承認</h1><p>${escape(registration.name)} に、あなたの時間割・教材・課題等を読み取る権限を与えます。</p>${scopes.includes('scombz:write') ? '<p><strong>専用の課題提出・小テスト開始と回答・アンケート回答ツールの利用を許可します。</strong>OAuth承認だけでは送信しません。各操作は内容と添付を確認する専用画面で、管理キーによる本人の承認を毎回必要とします。アップロード・確認画面への送信・最終登録もそれぞれ別の承認です。</p>' : ''}${scopes.includes('scombz:session') ? '<p><strong>ScombZ WebのSESSION CookieをChatGPTへ渡す権限も許可します。</strong>受け取った側は本人としてScombZへ直接アクセスできます。Cookieには提出・受験などの権限も含まれ、読み取り専用には制限できません。書き込み前には毎回内容を確認してください。Cookieを会話の本文・共有ファイル・GitHubに掲載しないでください。</p>' : ''}<p>戻り先: <code>${escape(new URL(p.get('redirect_uri')).origin)}</code></p><p>このWorkerの管理キーを入力してください。ScombZのパスワードは入力しません。</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${escape(ticket)}"><input name="admin_token" type="password" autocomplete="off" required aria-label="管理キー"><button>接続を承認</button></form></html>`,
+      `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ScombZへの接続を承認</title><style>body{font:16px system-ui;max-width:560px;margin:60px auto;padding:24px;line-height:1.8}input,button{font:inherit;padding:12px;width:100%;box-sizing:border-box;margin:10px 0}code{overflow-wrap:anywhere}</style><h1>ScombZへの接続を承認</h1><p>${escape(registration.name)} に、あなたの時間割・教材・課題等を読み取る権限を与えます。</p>${scopes.includes('scombz:session') ? '<p><strong>ScombZ WebのSESSION CookieをChatGPTへ渡す権限も許可します。</strong>受け取った側は本人としてScombZへ直接アクセスできます。Cookieには提出・受験などの権限も含まれ、読み取り専用には制限できません。取得・調査にのみ使用し、書き込みには使用しないでください。Cookieを会話の本文・共有ファイル・GitHubに掲載しないでください。</p>' : ''}<p>戻り先: <code>${escape(new URL(p.get('redirect_uri')).origin)}</code></p><p>このWorkerの管理キーを入力してください。ScombZのパスワードは入力しません。</p><form method="post" action="/oauth/approve"><input type="hidden" name="ticket" value="${escape(ticket)}"><input name="admin_token" type="password" autocomplete="off" required aria-label="管理キー"><button>接続を承認</button></form></html>`,
       p.get('redirect_uri'),
     );
   }
