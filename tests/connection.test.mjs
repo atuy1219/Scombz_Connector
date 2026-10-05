@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handle } from '../src/worker.mjs';
-import { WRITE_TOOLS } from '../src/submission-adapters.mjs';
 
 const env = { SITE_ORIGIN: 'https://fixture.workers.dev' };
 const rpc = (body) =>
@@ -14,7 +13,7 @@ const rpc = (body) =>
     body: JSON.stringify(body),
   });
 
-test('stateless MCP discovery separates read, session export and dedicated write preparation', async () => {
+test('stateless MCP initialization and discovery advertise OAuth for all 12 tools', async () => {
   const init = await handle(
     rpc({
       jsonrpc: '2.0',
@@ -41,12 +40,7 @@ test('stateless MCP discovery separates read, session export and dedicated write
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 20);
-  assert.ok(
-    !list.result.tools.some((t) =>
-      ['get_submission_form', 'prepare_submission', 'submit_http'].includes(t.name),
-    ),
-  );
+  assert.equal(list.result.tools.length, 12);
   const readFile = list.result.tools.find((tool) => tool.name === 'read_file');
   assert.deepEqual(Object.keys(readFile.inputSchema.properties).sort(), ['course_id', 'file_id']);
   assert.ok(readFile.description.includes('PDF全体を1回取得するツール'));
@@ -55,13 +49,7 @@ test('stateless MCP discovery separates read, session export and dedicated write
     assert.deepEqual(tool.securitySchemes, [
       {
         type: 'oauth2',
-        scopes: [
-          tool.name === 'get_web_session'
-            ? 'scombz:session'
-            : WRITE_TOOLS.has(tool.name)
-              ? 'scombz:write'
-              : 'scombz:read',
-        ],
+        scopes: [tool.name === 'get_web_session' ? 'scombz:session' : 'scombz:read'],
       },
     ]);
     assert.deepEqual(tool._meta.securitySchemes, tool.securitySchemes);

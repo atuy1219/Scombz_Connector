@@ -135,6 +135,7 @@ before(async () => {
     '0002_mobile_auth.sql',
     '0003_write_drafts.sql',
     '0004_session_export_scope.sql',
+    '0005_remove_write_support.sql',
   ]) {
     const migration = await readFile('migrations/' + name, 'utf8');
     await db.exec(migration.replaceAll('\n', ' '));
@@ -364,6 +365,7 @@ test('authorization binds redirect, resource, scope and S256 PKCE', async () => 
     { resource: 'https://other.example/mcp' },
     { code_challenge_method: 'plain' },
     { scope: 'admin' },
+    { scope: 'scombz:read scombz:write' },
   ])
     assert.equal((await authorize(p)).response.status, 400);
   assert.equal(
@@ -691,49 +693,32 @@ test('revoke keeps the session; deletion removes session and OAuth grants', asyn
   );
 });
 
-test('dedicated writes require independent consent and old grants cannot escalate', async () => {
-  const old = await (
-    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:session' }))
-  ).json();
-  const before = upstream;
-  const args = { course_id: 'c', assignment_id: 'r', fields: {} };
-  const denied = await rpc('prepare_assignment_submission', args, {
-    Authorization: 'Bearer ' + old.access_token,
-  });
-  assert.equal(denied.status, 401);
-  assert.ok(denied.headers.get('www-authenticate').includes('scope="scombz:write"'));
-  assert.equal(upstream, before);
-  const rotated = await (
-    await form('/oauth/token', {
-      grant_type: 'refresh_token',
-      client_id: clientId,
-      resource: origin + '/mcp',
-      refresh_token: old.refresh_token,
-      scope: 'scombz:read scombz:session scombz:write',
-    })
-  ).json();
-  assert.equal(rotated.scope, 'scombz:read scombz:session');
-  assert.equal(
-    (
-      await rpc('prepare_assignment_submission', args, {
-        Authorization: 'Bearer ' + rotated.access_token,
-      })
-    ).status,
-    401,
+test('removed write approval routes cannot fetch ScombZ', async () => {
+  for (const method of ['GET', 'POST']) {
+    const response = await req('/write/' + 'a'.repeat(43), { method });
+    assert.equal(response.status, 404);
+  }
+});
+
+test('write removal migration deletes drafts and preserves read/session grants', async () => {
+  await db.exec('CREATE TABLE write_drafts (id TEXT PRIMARY KEY, data TEXT)');
+  await db.prepare('INSERT INTO write_drafts VALUES (?,?)').bind('obsolete', 'encrypted').run();
+  await db
+    .prepare('INSERT INTO oauth_scopes VALUES (?,?,?)')
+    .bind('obsolete-scope', 'scombz:read scombz:session scombz:write', 9999999999)
+    .run();
+  await db.exec(
+    (await readFile('migrations/0005_remove_write_support.sql', 'utf8')).replaceAll('\n', ' '),
   );
-  assert.equal(upstream, before);
-  const { response } = await authorize({ scope: 'scombz:read scombz:write' });
-  const consent = await response.text();
-  assert.ok(consent.includes('OAuth承認だけでは送信しません'));
-  assert.ok(consent.includes('本人の承認を毎回必要'));
-  const approved = await (
-    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:write' }))
-  ).json();
-  assert.equal(approved.scope, 'scombz:read scombz:write');
-  // Missing target can be read, but preparation must never issue a POST upstream.
-  const prepared = await rpc('prepare_assignment_submission', args, {
-    Authorization: 'Bearer ' + approved.access_token,
-  });
-  assert.equal(prepared.status, 200);
-  assert.equal((await prepared.json()).result.isError, true);
+  assert.equal(
+    (await db.prepare('SELECT scope FROM oauth_scopes WHERE hash=?').bind('obsolete-scope').first())
+      .scope,
+    'scombz:read scombz:session',
+  );
+  assert.equal(
+    await db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='write_drafts'")
+      .first(),
+    null,
+  );
 });

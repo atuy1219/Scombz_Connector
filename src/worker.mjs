@@ -2,8 +2,6 @@ import { ScombClient, ScombError } from './client.mjs';
 import { MobileAuthClient, MobileAuthStore } from './mobile-auth.mjs';
 import { mcpResponse } from './mcp.mjs';
 import { html, script } from './ui.mjs';
-import { confirmationPage, confirmWrite } from './writes.mjs';
-import { WRITE_TOOLS } from './submission-adapters.mjs';
 import { configured, verify } from './crypto.mjs';
 import { oauth, admin, access, challenge, json, htmlResponse, readBody } from './oauth.mjs';
 
@@ -41,13 +39,6 @@ export async function handle(request, env, options = {}) {
         version: '1.0.0',
         configured: configured(env),
       });
-    const writeId = url.pathname.match(/^\/write\/([A-Za-z0-9_-]{43})$/)?.[1];
-    if (writeId && configured(env)) {
-      if (request.method === 'GET') return confirmationPage(writeId);
-      if (request.method === 'POST')
-        return await confirmWrite(request, env, new ScombClient(env, options), writeId, origin);
-      return json({ message: 'Method not allowed' }, 405);
-    }
     if (url.pathname === '/mcp') {
       if (request.method !== 'POST')
         return json({ message: 'POST /mcp を使用してください。' }, 405, {
@@ -78,9 +69,7 @@ export async function handle(request, env, options = {}) {
       const requiredScope =
         rpc.method === 'tools/call' && rpc.params?.name === 'get_web_session'
           ? 'scombz:session'
-          : rpc.method === 'tools/call' && WRITE_TOOLS.has(rpc.params?.name)
-            ? 'scombz:write'
-            : 'scombz:read';
+          : 'scombz:read';
       if (!discovery.has(rpc.method) && !(await access(request, env, origin, requiredScope))) {
         const hint = challenge(origin, requiredScope);
         return json(
@@ -95,9 +84,7 @@ export async function handle(request, env, options = {}) {
                   text:
                     requiredScope === 'scombz:session'
                       ? 'SESSION受け渡しの権限を追加してOAuthで再接続してください。'
-                      : requiredScope === 'scombz:write'
-                        ? '専用の提出・回答ツールの権限をOAuthで承認してください。'
-                        : 'OAuthでScombZ Connectorを接続してください。',
+                      : 'OAuthでScombZ Connectorを接続してください。',
                 },
               ],
               _meta: { 'mcp/www_authenticate': [hint] },
@@ -143,10 +130,7 @@ export async function handle(request, env, options = {}) {
         }
         const mobile = new MobileAuthClient(env, mobileOptions);
         const login = await mobile.login(body?.user, body?.password);
-        await env.DB.batch([
-          env.DB.prepare('DELETE FROM session'),
-          env.DB.prepare('DELETE FROM write_drafts'),
-        ]);
+        await env.DB.prepare('DELETE FROM session').run();
         const status = await client.connection();
         return json({ ...login, ...status, auth_method: 'mobile_api_otkey' });
       }
@@ -154,10 +138,7 @@ export async function handle(request, env, options = {}) {
         if (request.headers.get('origin') !== origin)
           return json({ message: 'この管理画面から操作してください。' }, 403);
         await new MobileAuthStore(env).clear();
-        await env.DB.batch([
-          env.DB.prepare('DELETE FROM session'),
-          env.DB.prepare('DELETE FROM write_drafts'),
-        ]);
+        await env.DB.prepare('DELETE FROM session').run();
         return json({ deleted: true, connected: false });
       }
       if (url.pathname === '/api/status' && request.method === 'GET')
@@ -168,7 +149,6 @@ export async function handle(request, env, options = {}) {
         await env.DB.batch([
           env.DB.prepare('DELETE FROM session'),
           env.DB.prepare('DELETE FROM mobile_auth'),
-          env.DB.prepare('DELETE FROM write_drafts'),
           env.DB.prepare('DELETE FROM oauth_codes'),
           env.DB.prepare('DELETE FROM oauth_tokens'),
         ]);
@@ -178,7 +158,6 @@ export async function handle(request, env, options = {}) {
         if (request.headers.get('origin') !== origin)
           return json({ message: 'この管理画面から操作してください。' }, 403);
         await env.DB.batch([
-          env.DB.prepare('DELETE FROM write_drafts'),
           env.DB.prepare('DELETE FROM oauth_codes'),
           env.DB.prepare('DELETE FROM oauth_tokens'),
         ]);
