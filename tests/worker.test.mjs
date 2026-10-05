@@ -334,7 +334,7 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   assert.equal(value.delivery, 'mcp_embedded_resource');
   const embedded = payload.result.content.find((x) => x.type === 'resource');
   assert.ok(embedded);
-  assert.equal(embedded.resource.uri, value.download_url);
+  assert.equal(embedded.resource.uri, 'scombz://material/first.pdf');
   assert.equal(embedded.resource.mimeType, 'application/pdf');
   assert.equal(atob(embedded.resource.blob), '%PDF-1.7 fixture');
   const resourceLink = payload.result.content.find((x) => x.type === 'resource_link');
