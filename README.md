@@ -41,7 +41,6 @@ ScombZ認証はWorkerの管理画面だけで完結します。学籍番号と�
 
 ScombZ Webセッションが期限切れになった場合、Connectorは保存済みMobile API認証から新しいOTKEYを取得し、Webセッションを自動更新して1回だけ処理を再試行します。Mobile API認証自体が期限切れになった場合は、`get_connection_status` が管理画面URLを返すので、そこから再ログインしてください。
 
-`session.json` の作成・アップロード方式は使用しません。
 
 ## できること
 
