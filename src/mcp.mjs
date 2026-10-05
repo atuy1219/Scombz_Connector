@@ -14,6 +14,14 @@ const fileId = z.string().regex(/^(material|assignment):[A-Za-z0-9_-]+:[A-Za-z0-
 const semester = z.enum(['first', 'second']);
 const year = z.number().int().min(1990).max(2100);
 const textFile = /\.(txt|md|csv|tsv|json|xml|py|js|java|c|h|cpp|tex|sql|yaml|yml)$/i;
+const MAX_EMBEDDED_PDF_BYTES = 5 * 1024 * 1024;
+const base64Bytes = (bytes) => {
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk)
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+};
 const readonly = {
   readOnlyHint: true,
   destructiveHint: false,
@@ -238,18 +246,50 @@ export async function mcpResponse(request, env, options = {}) {
       let mime = name.endsWith('.pdf') ? 'application/pdf' : 'application/octet-stream';
       let bytes = null;
       let extracted;
+      let embeddedResource = null;
       if (name.endsWith('.pdf')) {
-        extracted = {
-          format: 'pdf',
-          text: null,
-          requested_pages: {
-            start_page: args.start_page,
-            end_page: args.end_page ?? args.start_page + 9,
-          },
-          warnings: [
-            'PDF原本をdownload_urlから取得し、クライアント側で読んでください。Connectorは原本を永続保存しません。',
-          ],
-        };
+        try {
+          const file = await client.materialFile(
+            args.course_id,
+            args.file_id,
+            MAX_EMBEDDED_PDF_BYTES,
+          );
+          mime = file.mime || 'application/pdf';
+          bytes = file.bytes.length;
+          embeddedResource = {
+            type: 'resource',
+            resource: {
+              uri: downloadUrl,
+              mimeType: mime,
+              blob: base64Bytes(file.bytes),
+            },
+            annotations: { audience: ['assistant', 'user'], priority: 1 },
+          };
+          extracted = {
+            format: 'pdf',
+            text: null,
+            requested_pages: {
+              start_page: args.start_page,
+              end_page: args.end_page ?? args.start_page + 9,
+            },
+            delivery: 'mcp_embedded_resource',
+            warnings: [],
+          };
+        } catch (error) {
+          if (!(error instanceof ScombError) || error.code !== 'file_too_large') throw error;
+          extracted = {
+            format: 'pdf',
+            text: null,
+            requested_pages: {
+              start_page: args.start_page,
+              end_page: args.end_page ?? args.start_page + 9,
+            },
+            delivery: 'mcp_resource_link',
+            warnings: [
+              'PDFが埋め込み上限5MiBを超えるため、MCP resource_linkと期限付き原本URLを返します。',
+            ],
+          };
+        }
       } else if (textFile.test(name)) {
         try {
           const file = await client.materialFile(args.course_id, args.file_id);
@@ -286,8 +326,8 @@ export async function mcpResponse(request, env, options = {}) {
         retention: 'not_stored_by_connector',
         download_url: downloadUrl,
         download_expires_at: new Date(expires * 1000).toISOString(),
-        delivery: 'mcp_resource_link',
         _content: [
+          ...(embeddedResource ? [embeddedResource] : []),
           {
             type: 'resource_link',
             uri: downloadUrl,
@@ -295,7 +335,8 @@ export async function mcpResponse(request, env, options = {}) {
             title: metadata.filename,
             description: 'ScombZから取得する教材・課題添付の原本です。期限付きURLで、Connectorには永続保存しません。',
             mimeType: mime,
-            annotations: { audience: ['assistant', 'user'], priority: 1 },
+            ...(bytes !== null ? { size: bytes } : {}),
+            annotations: { audience: ['assistant', 'user'], priority: embeddedResource ? 0.5 : 1 },
           },
         ],
         ...extracted,
