@@ -48,8 +48,13 @@ test('Mobile API login stores only the bearer token and OTKEY bridge yields SESS
           assert.equal(init.headers.Authorization, 'Bearer mobile-bearer-token');
           return json({ status: 'OK', otkey: 'one-time-key' });
         }
+        if (url.pathname.includes('/smob/api/timetable/')) {
+          assert.equal(init.headers.Authorization, 'Bearer mobile-bearer-token');
+          return json([{ classId: 'COURSE1' }]);
+        }
         if (url.host === 'mobile.scombz.shibaura-it.ac.jp') {
-          assert.ok(url.pathname.startsWith('/one-time-key/'));
+          assert.equal(url.pathname, '/one-time-key/lms/course');
+          assert.equal(url.searchParams.get('idnumber'), 'COURSE1');
           return new Response(null, {
             status: 302,
             headers: {
@@ -95,6 +100,7 @@ test('OTKEY bridge never follows redirects outside ScombZ hosts', async () => {
         const url = new URL(input);
         if (url.pathname.endsWith('/smob/api/otkey'))
           return json({ status: 'OK', otkey: 'one-time-key' });
+        if (url.pathname.includes('/smob/api/timetable/')) return json([{ classId: 'COURSE1' }]);
         if (url.host === 'mobile.scombz.shibaura-it.ac.jp')
           return new Response(null, {
             status: 302,
