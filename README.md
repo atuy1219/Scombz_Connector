@@ -10,7 +10,7 @@
 
 1. 上の **Deploy to Cloudflare** を押し、自分のGitHub・Cloudflareアカウントでデプロイします。WorkerとD1の作成、デプロイ後のD1マイグレーションに対応しています。Cloudflareの確認画面でデプロイコマンドが `npm run deploy` になっていることを確認してください。
 2. 2つのSecretを設定します。デプロイ時に `ADMIN_TOKEN` と `SESSION_ENCRYPTION_KEY` の入力欄が出た場合は、後述のコマンドで生成して入力します。未設定でデプロイした場合は、Workerのトップページの「初回設定のキーを作成」で生成し、Cloudflareの **Worker → Settings → Variables and Secrets** に2つとも **Secret** として保存します。
-3. Workerのトップページを開き、`ADMIN_TOKEN` で管理画面を開きます。後述の方法で作成した `session.json` を登録し、「ScombZに接続済み」を確認します。
+3. Workerのトップページを開き、`ADMIN_TOKEN` で管理画面を開きます。学籍番号とパスワードでScombZへログインします。Workerは公式ScombMobile APIでBearer tokenを取得し、OTKEY経由でScombZ Webセッションを取得します。パスワードは保存しません。
 4. 画面のMCP URL（`https://あなたのWorker.workers.dev/mcp`）をコピーします。ChatGPTの **Settings → Security and login → Developer mode** を有効にし、**Plugins → ＋** から登録します。認証方式は **OAuth / Dynamic Client Registration（DCR）** を選びます。Client ID・Client Secretの手入力は不要です。
 5. 接続時に開くWorkerの承認ページで、`ADMIN_TOKEN` を入力して承認します。これはScombZのパスワードではありません。必要に応じて下記のSkillも追加できます。
 6. 新しいチャットでScombZ Connectorを選択し、「接続できる？」や「データ構造とアルゴリズム2の第一回の資料を取得して」と依頼します。
@@ -33,23 +33,15 @@ node scripts/generate-secrets.mjs
 
 Wranglerはデプロイ時に既存Secretを保持します。このプロジェクトでは `keep_vars: true` も指定し、管理画面で追加した通常の変数も更新時に保持します。ただし認証・暗号化キーは通常の変数ではなくSecretとして保存してください。
 
-`SESSION_ENCRYPTION_KEY` を変更すると既存のセッション、OAuthクライアント・トークン、資料リンクが無効になります。元のキーを安全に保管していれば元に戻してください。元のキーを失った場合は新しいキーを一度だけSecretとして保存し、session.jsonを再登録したうえでChatGPTのコネクタをDCRで作り直します。キーの変更は、通常の更新とは別の復旧作業です。
+`SESSION_ENCRYPTION_KEY` を変更すると既存のScombZ認証、OAuthクライアント・トークン、資料リンクが無効になります。元のキーを失った場合は新しいキーを一度だけSecretとして保存し、管理画面からScombZへ再ログインしたうえでChatGPTのコネクタをDCRで作り直します。
 
-## session.jsonを作成する
+## ScombZ認証
 
-本人のPCで実行します。ScombZへのログイン・MFAはローカルブラウザで行います。Workerへパスワードを送る機能はありません。
+ScombZ認証はWorkerの管理画面だけで完結します。学籍番号とパスワードはログイン要求中だけ公式ScombMobile APIへ送信し、WorkerのD1には保存しません。D1にはMobile APIのBearer tokenと、OTKEYから取得したScombZ WebセッションだけをAES-256-GCMで暗号化して保存します。
 
-```sh
-git clone https://github.com/atuy1219/Scombz_Connector.git
-cd Scombz_Connector
-npm ci
-npx playwright install chromium
-node scripts/export-session.mjs
-```
+ScombZ Webセッションが期限切れになった場合、Connectorは保存済みMobile API認証から新しいOTKEYを取得し、Webセッションを自動更新して1回だけ処理を再試行します。Mobile API認証自体が期限切れになった場合は、`get_connection_status` が管理画面URLを返すので、そこから再ログインしてください。
 
-開いたブラウザでログインすると、ScombZ用Cookieだけを `.private/session.json` に保存します。管理画面にこのファイルを登録してください。すでにPlaywright形式の `session.json` がある場合は、そのまま登録できます。登録上限は64KiBです。他ドメインのCookieやlocalStorageはサーバーに保存しません。
-
-セッションが失効すると再登録が必要です。パスワード・MFAを保存した自動ログインは実装していません。
+`session.json` の作成・アップロード方式は使用しません。
 
 ## できること
 
@@ -74,7 +66,7 @@ node scripts/export-session.mjs
 
 原本ダウンロードは**100MiBまで**です。PDFやその他のバイナリはWorkerのメモリへ全量展開せず、ScombZからクライアントへストリーミング転送します。テキスト形式だけは本文抽出のため最大8MiBまでWorker内で読み込み、それを超える場合は原本リンクのみ返します。
 
-`read_file` は原本をConnectorへ永続保存しません。PDFは取得時にも原本を先読みせず、**5分間有効な署名付きダウンロードリンク**を返します。ChatGPT等のクライアントが必要になった時点でそのURLから取得します。通常の閲覧では一時取得のままとし、長期保存が必要な資料は利用者が明示的に保存を指示した場合だけクライアント側のLibrary等へ保存してください。Connector自体には教材をバックアップする機能を持たせません。
+`read_file` は原本をConnectorへ永続保存しません。PDF・バイナリは**MCP `resource_link`**として返し、ChatGPT等のMCPクライアントがファイルとして取得できる形にします。同時に10分間有効な署名付きHTTPS URLも返すため、resource linkを扱えないクライアントでも原本を取得できます。通常の閲覧では一時取得のままとし、長期保存が必要な資料は利用者が明示した場合だけクライアント側へ保存してください。
 
 リンクは特定の科目・ファイル・Workerだけに使えます。有効期間内にリンクを知る人は原本を取得できるため、公開しないでください。期限切れ時は `read_file` を再実行します。管理画面の「接続を解除」はOAuthトークンを無効にしますが、すでに発行した資料リンクは最大5分残ります。「セッションを削除」すると資料リンクでの取得も停止します。
 
@@ -93,7 +85,7 @@ python scripts/package-skill.py
 ## データと認証
 
 - WorkerとD1は利用者本人のCloudflareアカウントにあります。作者への転送・テレメトリーは実装していません。
-- D1のセッションはAES-256-GCMで暗号化し、鍵はWorker Secretに保存します。利用者のCloudflare環境は鍵と暗号文の双方を扱います。
+- D1にはMobile APIのBearer tokenとOTKEYから得たScombZ WebセッションをAES-256-GCMで暗号化して保存します。学籍番号・パスワードは保存しません。
 - OAuthは `scombz:read` のみ。DCR、S256 PKCE、短期間の認証コード、1時間のアクセストークン、30日間の更新トークンのローテーションに対応します。
 - OAuthトークンはハッシュで保存し、`/mcp` のresource、期限、種別を検証します。管理キーでMCPを呼び出すことはできず、OAuthトークンで管理画面を操作することもできません。
 - 管理画面でOAuth接続の一括解除、セッション削除ができます。作者のChatGPTメールアドレスや `oai-authenticated-user-*` ヘッダーを認証に使いません。
@@ -151,12 +143,12 @@ Deployボタンで作成した**利用者側のリポジトリ**にpushすると
 | --- | --- |
 | サーバー設定が未完了 | 2つのSecretとD1バインディング `DB` |
 | 管理画面で処理が500になる | `npx wrangler d1 migrations apply DB --remote` |
-| ScombZが未接続 / 期限切れ | 本人のPCでsession.jsonを作り直して再登録 |
+| ScombZが未接続 / Mobile API認証が期限切れ | Workerの管理画面を開き、ScombZへ再ログイン |
 | OAuthの `invalid_client` | 暗号化キーを変更した場合はChatGPTのMCP接続を作り直す |
 | ChatGPTにツールがない | 接続情報を更新して新しいチャットで選択 |
-| 資料リンクが401 | `read_file` を再実行して新しいリンクを使う |
+| 資料リンクが401 | `read_file` を再実行して新しいresource linkを使う |
 
-暗号化キーを変更すると、既存のセッションは復号できなくなり、署名済みクライアント・トークン・資料リンクも使えなくなります。セッションを再登録し、ChatGPTのMCP接続を作り直してください。
+暗号化キーを変更すると、既存のScombZ認証は復号できなくなり、署名済みクライアント・トークン・資料リンクも使えなくなります。管理画面からScombZへ再ログインし、ChatGPTのMCP接続を作り直してください。
 
 ## 参照資料
 
