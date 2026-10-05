@@ -1,4 +1,5 @@
 import { ScombClient, ScombError } from './client.mjs';
+import { MobileAuthClient, MobileAuthStore } from './mobile-auth.mjs';
 import { mcpResponse } from './mcp.mjs';
 import { html, script } from './ui.mjs';
 import { configured, verify } from './crypto.mjs';
@@ -85,6 +86,61 @@ export async function handle(request, env, options = {}) {
       if (!(await admin(request, env)))
         return json({ message: '管理キーまたはCloudflareの設定を確認してください。' }, 401);
       const client = new ScombClient(env, options);
+      const mobileOptions = options.mobile ?? {};
+      if (url.pathname === '/api/mobile/status' && request.method === 'GET')
+        return json({ token_stored: await new MobileAuthStore(env).exists() });
+      if (url.pathname === '/api/mobile/login' && request.method === 'POST') {
+        if (request.headers.get('origin') !== origin)
+          return json({ message: 'この管理画面から操作してください。' }, 403);
+        if (!request.headers.get('content-type')?.startsWith('application/json'))
+          return json({ message: 'JSONが必要です。' }, 415);
+        let raw;
+        try {
+          raw = await readBody(request);
+        } catch {
+          return json({ message: 'Request too large' }, 413);
+        }
+        let body;
+        try {
+          body = JSON.parse(raw);
+        } catch {
+          return json({ message: 'JSONの形式を確認できません。' }, 400);
+        }
+        return json(await new MobileAuthClient(env, mobileOptions).login(body?.user, body?.password));
+      }
+      if (url.pathname === '/api/mobile/probe' && request.method === 'POST') {
+        if (request.headers.get('origin') !== origin)
+          return json({ message: 'この管理画面から操作してください。' }, 403);
+        const mobile = new MobileAuthClient(env, mobileOptions);
+        let sessionid_state = { available: false, length: 0 };
+        try {
+          sessionid_state = await mobile.getSessionIdState();
+        } catch (error) {
+          if (!(error instanceof ScombError) || error.code !== 'mobile_upstream_error') throw error;
+          sessionid_state = { available: false, length: 0, unavailable: true };
+        }
+        const bridge = await mobile.exchangeOtkey();
+        let connected = false;
+        if (bridge.session) {
+          await client.replaceSession({ cookies: [bridge.session], origins: [] });
+          connected = true;
+        }
+        return json({
+          mobile_authenticated: true,
+          sessionid_state,
+          otkey_received: bridge.otkey_received,
+          web_session_acquired: !!bridge.session,
+          connected,
+          diagnostics: bridge.diagnostics,
+          fallback_recommended: !connected,
+        });
+      }
+      if (url.pathname === '/api/mobile' && request.method === 'DELETE') {
+        if (request.headers.get('origin') !== origin)
+          return json({ message: 'この管理画面から操作してください。' }, 403);
+        await new MobileAuthStore(env).clear();
+        return json({ deleted: true });
+      }
       if (url.pathname === '/api/status' && request.method === 'GET')
         return json(await client.connection());
       if (url.pathname === '/api/connection' && request.method === 'POST') {
