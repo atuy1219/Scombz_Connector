@@ -86,6 +86,7 @@ before(async () => {
     external: ['node:*'],
   });
   mf = new Miniflare({
+    cf: false,
     modules: true,
     scriptPath: '.wrangler/test-worker.mjs',
     compatibilityDate: '2026-08-01',

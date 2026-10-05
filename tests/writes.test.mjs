@@ -70,6 +70,7 @@ const snapshot = () => ({
 });
 before(async () => {
   mf = new Miniflare({
+    cf: false,
     modules: true,
     script: 'export default {fetch(){return new Response("ok")}}',
     d1Databases: ['DB'],
@@ -419,4 +420,39 @@ test('text assignments require explicit new text and stop at unverified final pa
     ['creationTime', '5'],
   ]);
   assert.throws(() => submissionForms(html, source, target, 'continuation'));
+});
+
+test('sequential survey initialization sets flags without executing scripts and rejects branch jumps', () => {
+  const html = `<form id="surveysTakeForm" action="/lms/course/surveys/take" method="post"><input name="_csrf" type="hidden" value="secret"><input name="idnumber" type="hidden" value="c"><input name="surveyId" type="hidden" value="r"><input name="takeFlag" type="hidden" value="1"><div class="block"><div class="question_itme survey_itme_1"><div class="highlight-txt">[必須]</div><div class="branchFlag" data-branchflag="true"></div><input class="enableSurveyItem" name="surveyDetail[0].enableSurveyItem" value="" type="hidden"><input class="branchType" value="radio" type="hidden"><div class="surveys-contents-quetison-area"><label class="branchNo" data-nextno="0" data-no="1"></label><input name="answerDetail[0].answerItem[0].answer" type="radio" value="1"><div class="break">合成の選択肢</div></div></div></div><a onclick="$(&apos;#surveysTakeForm&apos;).submit();">確認画面へ</a></form><script>function setBranch(){} function loadSetBranch(){} $("#takeFlag").val("0"); throw new Error('must not execute');</script>`;
+  const forms = submissionForms(html, source, { ...target, kind: 'survey' });
+  assert.ok(
+    forms[0].hidden.some(([n, v]) => n === 'surveyDetail[0].enableSurveyItem' && v === '1'),
+  );
+  assert.ok(forms[0].hidden.some(([n, v]) => n === 'takeFlag' && v === '0'));
+  assert.equal(forms[0].fields[0].label, '合成の選択肢');
+  assert.throws(() => validateValues(forms[0], {}));
+  for (const changed of [
+    html.replace('data-nextno="0"', 'data-nextno="3"'),
+    html.replace('survey_itme_1', 'survey_itme_2'),
+    html.replace('data-branchflag="true"', 'data-branchflag="false"'),
+    html.replace('function setBranch()', 'function unfamiliar()'),
+    html.replace('確認画面へ', '提出する'),
+    html.replace('<a onclick=', '<input name="_method" type="hidden" value="put"><a onclick='),
+  ])
+    assert.throws(() => submissionForms(changed, source, { ...target, kind: 'survey' }));
+});
+test('required survey matrix rows require an answer in every row and retain row/column labels', () => {
+  const html = `<form id="surveysTakeForm" action="/lms/course/surveys/take" method="post"><input name="_csrf" type="hidden" value="secret"><input name="idnumber" type="hidden" value="c"><input name="surveyId" type="hidden" value="r"><div class="block"><div class="highlight-txt">[必須]</div><div class="survey-question-table"><div class="survey-question-table-line"><div>行</div><div>列A</div></div><div class="survey-question-table-line"><div class="break">行A</div><div><input type="checkbox" name="answerDetail[0].answerItem[0].answer" value="1"></div></div><div class="survey-question-table-line"><div class="break">行B</div><div><input type="checkbox" name="answerDetail[1].answerItem[0].answer" value="1"></div></div></div></div><a onclick="$(&apos;#surveysTakeForm&apos;).submit();">確認画面へ</a></form>`;
+  const form = submissionForms(html, source, { ...target, kind: 'survey' })[0];
+  assert.equal(form.fields[0].label, '行A / 列A');
+  assert.equal(form.fields[1].label, '行B / 列A');
+  assert.equal(form.required_groups.length, 2);
+  assert.throws(() => validateValues(form, { 'answerDetail[0].answerItem[0].answer': '1' }));
+  assert.equal(
+    validateValues(form, {
+      'answerDetail[0].answerItem[0].answer': '1',
+      'answerDetail[1].answerItem[0].answer': '1',
+    }).length,
+    2,
+  );
 });

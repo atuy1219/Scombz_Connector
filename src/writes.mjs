@@ -100,6 +100,18 @@ export function nativeForms(html, source, kind) {
               .text()
           : '') ||
         el.closest('label').text() ||
+        el.closest('.surveys-contents-quetison-area').find('.break').text() ||
+        (el.closest('.survey-question-table-line').length
+          ? el.closest('.survey-question-table-line').children('.break').first().text() +
+            ' / ' +
+            el
+              .closest('.survey-question-table')
+              .find('.survey-question-table-line')
+              .first()
+              .children()
+              .eq(Number(name.match(/answerItem\[(\d+)\]/)?.[1]) + 1)
+              .text()
+          : '') ||
         name;
       const options =
         tag === 'select'

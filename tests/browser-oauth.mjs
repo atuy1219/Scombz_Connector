@@ -22,6 +22,7 @@ test('browser OAuth form preserves Origin, follows the callback, and exchanges i
       external: ['node:*'],
     });
     mf = new Miniflare({
+      cf: false,
       modules: true,
       scriptPath: '.wrangler/browser-test-worker.mjs',
       compatibilityDate: '2026-08-01',

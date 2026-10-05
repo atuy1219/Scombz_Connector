@@ -176,16 +176,65 @@ export function submissionForms(html, source, target, phase = 'initial') {
   }
   if (target.kind === 'survey') {
     if (
+      form.find('input[name="_method"]').length ||
+      !form.find('input:not([type="hidden"])[name^="answerDetail"],textarea[name^="answerDetail"]')
+        .length
+    )
+      unsupported('アンケート回答入力画面ではありません。最終送信は行いません。');
+    if (
+      form
+        .find('.branchNo')
+        .toArray()
+        .some((e) => $(e).attr('data-nextno') !== '0')
+    )
+      unsupported('設問を飛ばす分岐は未対応です。');
+    if (
       form
         .find('.enableSurveyItem')
         .toArray()
         .some((e) => !['true', 'false', '1', '0'].includes($(e).attr('value') ?? ''))
-    )
-      unsupported(
-        '設問の有効フラグをJavaScriptで生成する形式です。有効設問・分岐処理を検証するまで送信できません。',
-      );
+    ) {
+      const questions = form.find('.question_itme');
+      const scripts = load(html)('script:not([src])').text();
+      if (
+        !questions.length ||
+        questions.length !== form.find('.enableSurveyItem').length ||
+        !scripts.includes('function setBranch()') ||
+        !scripts.includes('function loadSetBranch()') ||
+        !scripts.includes('$("#takeFlag").val("0")') ||
+        value($, form, 'takeFlag') !== '1'
+      )
+        unsupported('設問の有効化処理を検証できません。');
+      questions.each((i, e) => {
+        const q = $(e),
+          flag = q.find('.enableSurveyItem');
+        if (
+          !q.hasClass('survey_itme_' + (i + 1)) ||
+          flag.length !== 1 ||
+          flag.attr('name') !== 'surveyDetail[' + i + '].enableSurveyItem' ||
+          flag.attr('value') !== '' ||
+          q.find('.branchFlag').length !== 1 ||
+          q.find('.branchFlag').attr('data-branchflag') !== 'true' ||
+          !q.find('.branchNo').length ||
+          q
+            .find('.branchNo')
+            .toArray()
+            .some((n) => $(n).attr('data-no') !== String(i + 1)) ||
+          q
+            .find('.branchType')
+            .toArray()
+            .some((n) => !['radio', 'check', 'multCheck'].includes($(n).attr('value')))
+        )
+          unsupported('検証した順番表示のアンケート形式と異なります。');
+        // Reproduce the observed sequential setBranch/loadSetBranch result; never evaluate JS.
+        flag.attr('value', '1');
+      });
+      form.find('input[name="takeFlag"]').attr('value', '0');
+    }
     const expectedClick = "$('#" + formId + "').submit();";
     const anchors = form.find('a[onclick]');
+    if (!anchors.length || anchors.toArray().some((e) => !text($(e).text()).includes('確認')))
+      unsupported('アンケートの確認画面への操作を確認できません。');
     if (anchors.toArray().some((e) => $(e).attr('onclick')?.replace(/\s/g, '') !== expectedClick))
       unsupported('未対応のアンケート送信スクリプトがあります。');
     if (anchors.length) {
@@ -209,7 +258,23 @@ export function submissionForms(html, source, target, phase = 'initial') {
         : target.kind + '_form';
     f.required_groups = [];
     form.find('.block').each((_, block) => {
-      if (!text($(block).find('.block-title').first().text()).includes('[必須]')) return;
+      if (!text($(block).find('.block-title,.highlight-txt').text()).includes('[必須]')) return;
+      const matrixRows = $(block)
+        .find('.survey-question-table-line')
+        .filter((_, row) => $(row).find('input:not([type="hidden"])').length);
+      if (matrixRows.length) {
+        matrixRows.each((_, row) =>
+          f.required_groups.push([
+            ...new Set(
+              $(row)
+                .find('input:not([type="hidden"])')
+                .map((_, n) => $(n).attr('name'))
+                .get(),
+            ),
+          ]),
+        );
+        return;
+      }
       const names = [
         ...new Set(
           $(block)

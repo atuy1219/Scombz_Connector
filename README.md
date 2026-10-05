@@ -181,9 +181,9 @@ SESSIONは本人としてWebへアクセスする認証情報で、読み取り�
 | `get_quiz_answer_form` | 開始承認の応答から保存した問題フォームを読む |
 | `prepare_quiz_answers` | 保存したフォームに回答を設定して別の承認URLを準備 |
 | `get_survey_answer_form` | 設問と対応状況を読む |
-| `prepare_survey_answers` | 対応形式の回答を準備。未検証の有効フラグは停止 |
+| `prepare_survey_answers` | 順番表示の回答を準備。設問を飛ばす分岐は停止 |
 | `get_submission_status` | 今回の送信結果と次の確認を読む |
 
 準備ツールはScombZへPOSTしません。本人が `confirmation_url` を開き、管理キーで内容を表示し、今回の送信を承認すると1回だけ送信します。下書きは暗号化して10分間保存し、認証世代・対象・入力値を固定します。OAuthの `scombz:write` 承認は毎回の送信承認を代替しません。
 
-実HTMLから課題のupload→確認画面、小テストの開始→回答確認を確認しました。**最終提出までの動作は未検証で、この版は最終確認画面から先を送信しません。** アンケートのJavaScript生成フラグも未検証で停止します。専用ツールが停止した際にSESSION直接通信で迂回しないでください。調査内容・対応条件は [submission-html.md](docs/submission-html.md) を参照してください。
+実HTMLから課題のupload→確認画面、小テストの開始→回答確認を確認しました。**最終提出までの動作は未検証で、この版は最終確認画面から先を送信しません。** アンケートは検証した順番表示の有効フラグを再現します。設問を飛ばす分岐・未知の形式は停止します。専用ツールが停止した際にSESSION直接通信で迂回しないでください。調査内容・対応条件は [submission-html.md](docs/submission-html.md) を参照してください。
