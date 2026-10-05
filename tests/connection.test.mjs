@@ -6,7 +6,10 @@ const env = { SITE_ORIGIN: 'https://fixture.workers.dev' };
 const rpc = (body) =>
   new Request(env.SITE_ORIGIN + '/mcp', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+    },
     body: JSON.stringify(body),
   });
 
@@ -29,6 +32,7 @@ test('stateless MCP initialization and discovery advertise OAuth for all 11 tool
   const initialization = await init.json();
   assert.equal(initialization.result.protocolVersion, '2025-03-26');
   assert.equal(initialization.result.serverInfo.version, '1.0.0');
+  assert.ok(initialization.result.instructions.includes('初回に生成されたChatGPTファイルを再利用'));
   const notification = await handle(
     rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }),
     env,
@@ -37,6 +41,9 @@ test('stateless MCP initialization and discovery advertise OAuth for all 11 tool
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
   assert.equal(list.result.tools.length, 11);
+  const readFile = list.result.tools.find((tool) => tool.name === 'read_file');
+  assert.deepEqual(Object.keys(readFile.inputSchema.properties).sort(), ['course_id', 'file_id']);
+  assert.ok(readFile.description.includes('PDF全体を1回取得するツール'));
   for (const tool of list.result.tools) {
     assert.equal(tool.inputSchema.type, 'object');
     assert.deepEqual(tool.securitySchemes, [{ type: 'oauth2', scopes: ['scombz:read'] }]);

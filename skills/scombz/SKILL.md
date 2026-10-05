@@ -13,7 +13,7 @@ ScombZ ConnectorのMCPツールを使って、本人のScombZに表示される�
 2. `list_academic_terms`で本人が選択できる年度を確認し、`list_courses(year, semester)`で対象期の時間割と科目IDを取得する。同じ科目が複数時限に現れるので、コンテンツを取得する際は`course_id`で重複排除する。
 3. `list_course_contents(course_id)`で教材、課題、小テスト、アンケートのIDと表示状態を調べる。過去期の項目もこのツールで取得する。`list_current_tasks`は現在のタスク一覧だけで、過去期や提出済みの全件を含むとは限らない。
 4. 課題は`get_assignment`、小テストは`get_quiz`、アンケートは`get_survey`で内容を読む。大学全体のアンケートは`list_surveys`で一覧を調べ、`get_survey`の`course_id`を省略する。`auto`は公開済み結果を優先する。未受験の問題文が要項にない場合は「受験を開始しないと取得できない」と説明する。
-5. `read_file`には一覧が返した`file_id`をそのまま渡す。PDF・バイナリはMCP `resource_link`として返されるので、まずそのリソースをクライアント側で取得して読む。原本URLも同時に返るが、通常はresource linkを優先する。原本は最大100MiB、リンクは10分間有効。テキスト本文のWorker内抽出は8MiBまで。教材原本はConnectorへ永続保存せず、長期保存はユーザーが明示した場合だけクライアント側で行う。
+5. `read_file`には一覧が返した`file_id`をそのまま渡す。`read_file`は「PDF全体を1回取得するツール」であり、`start_page`・`end_page`・`max_chars`は指定しない。同一PDFについて`read_file`を繰り返し呼ばず、初回に生成されたChatGPTファイルを再利用する。続きや特定ページの確認はChatGPT側のFilesのページ読み取りを必要に応じて複数回行う。5MiB以下のPDFは原本全体がMCP埋め込みリソースで返り、それを超えるPDFとその他のバイナリはMCP `resource_link`から原本全体を一度取得する。原本は最大100MiB、リンクは10分間有効。リンクが期限切れでも取得済みのChatGPTファイルは再利用する。原本取得に失敗してChatGPTファイルが生成されていない場合だけ、再取得のために`read_file`を呼ぶ。テキスト本文のWorker内抽出は8MiBまで。教材原本はConnectorへ永続保存しない。教材リンクを公開・無関係な外部サービスへ転送しない。
 
 ## 回答時の扱い
 

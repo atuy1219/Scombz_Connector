@@ -7,7 +7,10 @@ import { digest, random, sign } from '../src/crypto.mjs';
 import { SessionStore } from '../src/storage.mjs';
 
 const origin = 'https://fixture.workers.dev';
-const bindings = { ADMIN_TOKEN: 'a'.repeat(64), SESSION_ENCRYPTION_KEY: 'b'.repeat(64) };
+const bindings = {
+  ADMIN_TOKEN: 'a'.repeat(64),
+  SESSION_ENCRYPTION_KEY: 'b'.repeat(64),
+};
 const state = {
   cookies: [
     {
@@ -49,14 +52,25 @@ const post = (path, body, headers = {}) =>
 const form = (path, body, headers = {}) =>
   req(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', ...headers },
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      ...headers,
+    },
     body: new URLSearchParams(body).toString(),
   });
-const adminHeaders = { Origin: origin, Authorization: 'Bearer ' + bindings.ADMIN_TOKEN };
+const adminHeaders = {
+  Origin: origin,
+  Authorization: 'Bearer ' + bindings.ADMIN_TOKEN,
+};
 const rpc = (name, args = {}, headers = {}) =>
   post(
     '/mcp',
-    { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } },
+    {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name, arguments: args },
+    },
     { Accept: 'application/json, text/event-stream', ...headers },
   );
 before(async () => {
@@ -91,6 +105,13 @@ before(async () => {
       if (path === '/lms/course') return new Response(course);
       if (path === '/lms/course/make/tempfile') return new Response('temporary-id');
       if (path.startsWith('/lms/course/material/setfiledown/')) {
+        if (upstreamMode === 'embedded-large')
+          return new Response('%PDF-1.7 fixture', {
+            headers: {
+              'Content-Type': 'application/pdf',
+              'Content-Length': String(6 * 1024 * 1024),
+            },
+          });
         if (upstreamMode === 'large')
           return new Response('%PDF-1.7 fixture', {
             headers: {
@@ -98,7 +119,9 @@ before(async () => {
               'Content-Length': String(100 * 1024 * 1024 + 1),
             },
           });
-        return new Response('%PDF-1.7 fixture', { headers: { 'Content-Type': 'application/pdf' } });
+        return new Response('%PDF-1.7 fixture', {
+          headers: { 'Content-Type': 'application/pdf' },
+        });
       }
       return new Response(page('home'));
     },
@@ -141,7 +164,10 @@ test('runtime health, script CSP and OAuth discovery require no personal data', 
 test('admin routes reject forged identity, bearer access and missing Origin', async () => {
   for (const headers of [
     {},
-    { 'oai-authenticated-user-id': 'owner', 'oai-authenticated-user-email': 'owner@example.test' },
+    {
+      'oai-authenticated-user-id': 'owner',
+      'oai-authenticated-user-email': 'owner@example.test',
+    },
   ])
     assert.equal((await req('/api/mobile', { method: 'DELETE', headers })).status, 401);
   assert.equal(
@@ -310,7 +336,11 @@ test('PKCE exchange, code replay prevention and private MCP work in workerd', as
   assert.equal(managementLink.uri, origin + '/');
   assert.equal(managementLink.mimeType, 'text/html');
   assert.equal(
-    (await req('/api/status', { headers: { Authorization: 'Bearer ' + accessToken } })).status,
+    (
+      await req('/api/status', {
+        headers: { Authorization: 'Bearer ' + accessToken },
+      })
+    ).status,
     401,
   );
   const rows = await db.prepare('SELECT hash FROM oauth_tokens').all();
@@ -320,7 +350,7 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   const beforeRead = upstream;
   const response = await rpc(
     'read_file',
-    { course_id: 'c', file_id: 'material:m:r', start_page: 1, end_page: 2 },
+    { course_id: 'c', file_id: 'material:m:r' },
     { Authorization: 'Bearer ' + accessToken },
   );
   assert.equal(response.status, 200);
@@ -328,6 +358,7 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   const value = payload.result.structuredContent;
   assert.equal(value.format, 'pdf');
   assert.equal(value.text, null);
+  assert.equal(Object.hasOwn(value, 'requested_pages'), false);
   assert.equal(value.bytes, new TextEncoder().encode('%PDF-1.7 fixture').length);
   assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
   assert.equal(value.retention, 'not_stored_by_connector');
@@ -352,7 +383,11 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   assert.equal(result.status, 200);
   assert.equal(await result.text(), '%PDF-1.7 fixture');
   assert.equal(result.headers.get('cache-control'), 'private, no-store');
-  assert.equal(upstream, beforeDownload + 3, 'download resolves metadata, tempfile and original once');
+  assert.equal(
+    upstream,
+    beforeDownload + 3,
+    'download resolves metadata, tempfile and original once',
+  );
 
   upstreamMode = 'large';
   try {
@@ -367,6 +402,34 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
     (await req(url.pathname + url.search.replace('material%3Am%3Ar', 'material%3Am%3As'))).status,
     401,
   );
+});
+test('legacy page arguments are ignored and oversized embedded PDFs return a whole-file link', async () => {
+  upstreamMode = 'embedded-large';
+  try {
+    const response = await rpc(
+      'read_file',
+      {
+        course_id: 'c',
+        file_id: 'material:m:r',
+        start_page: 100,
+        end_page: 1,
+        max_chars: 1,
+      },
+      { Authorization: 'Bearer ' + accessToken },
+    );
+    const payload = await response.json();
+    assert.equal(payload.result.isError, undefined);
+    assert.equal(payload.result.structuredContent.format, 'pdf');
+    assert.equal(payload.result.structuredContent.delivery, 'mcp_resource_link');
+    assert.equal(Object.hasOwn(payload.result.structuredContent, 'requested_pages'), false);
+    assert.equal(
+      payload.result.content.some((item) => item.type === 'resource'),
+      false,
+    );
+    assert.ok(payload.result.content.some((item) => item.type === 'resource_link'));
+  } finally {
+    upstreamMode = 'ok';
+  }
 });
 test('refresh rotation cannot be replayed; tokens reject wrong audience and expiry', async () => {
   const data = {
@@ -407,7 +470,12 @@ test('file links reject expiry, changed identifiers and missing authentication w
   const count = upstream;
   for (const ticket of [
     '',
-    await sign(bindings, { kind: 'file', course_id: 'c', file_id: 'material:m:r', exp: 1 }),
+    await sign(bindings, {
+      kind: 'file',
+      course_id: 'c',
+      file_id: 'material:m:r',
+      exp: 1,
+    }),
     await sign(bindings, {
       kind: 'file',
       course_id: 'different',

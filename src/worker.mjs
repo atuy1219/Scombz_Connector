@@ -34,10 +34,16 @@ export async function handle(request, env, options = {}) {
         },
       });
     if (url.pathname === '/health' && request.method === 'GET')
-      return json({ name: 'scombz-connector', version: '1.0.0', configured: configured(env) });
+      return json({
+        name: 'scombz-connector',
+        version: '1.0.0',
+        configured: configured(env),
+      });
     if (url.pathname === '/mcp') {
       if (request.method !== 'POST')
-        return json({ message: 'POST /mcp を使用してください。' }, 405, { Allow: 'POST' });
+        return json({ message: 'POST /mcp を使用してください。' }, 405, {
+          Allow: 'POST',
+        });
       if (!request.headers.get('content-type')?.startsWith('application/json'))
         return json({ message: 'JSONが必要です。' }, 415);
       let raw;
@@ -68,7 +74,12 @@ export async function handle(request, env, options = {}) {
             id: rpc.id ?? null,
             result: {
               isError: true,
-              content: [{ type: 'text', text: 'OAuthでScombZ Connectorを接続してください。' }],
+              content: [
+                {
+                  type: 'text',
+                  text: 'OAuthでScombZ Connectorを接続してください。',
+                },
+              ],
               _meta: { 'mcp/www_authenticate': [hint] },
             },
           },
@@ -77,7 +88,11 @@ export async function handle(request, env, options = {}) {
         );
       }
       return mcpResponse(
-        new Request(request.url, { method: 'POST', headers: request.headers, body: raw }),
+        new Request(request.url, {
+          method: 'POST',
+          headers: request.headers,
+          body: raw,
+        }),
         env,
         options,
       );
@@ -162,7 +177,10 @@ export async function handle(request, env, options = {}) {
         !(await admin(request, env))
       )
         return json(
-          { message: 'ファイルリンクの期限が切れた場合はread_fileを再実行してください。' },
+          {
+            message:
+              '取得済みのChatGPTファイルがあれば再利用してください。原本を取得できておらずリンクの期限が切れた場合だけread_fileを再実行してください。',
+          },
           401,
         );
       const file = await new ScombClient(env, options).materialStream(courseId, fileId);
