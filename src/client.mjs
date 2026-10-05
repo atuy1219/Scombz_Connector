@@ -1,4 +1,6 @@
 import { SessionStore } from './storage.mjs';
+import { MobileAuthClient } from './mobile-auth.mjs';
+import { ScombError } from './errors.mjs';
 import {
   BASE,
   pageState,
@@ -48,12 +50,7 @@ const HOST = new URL(BASE).hostname;
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 export const MAX_INLINE_FILE_BYTES = 8 * 1024 * 1024;
 
-export class ScombError extends Error {
-  constructor(code, message) {
-    super(message);
-    this.code = code;
-  }
-}
+export { ScombError } from './errors.mjs';
 
 export function validateReadUrl(path, binary = false) {
   const u = new URL(path, BASE);
@@ -81,7 +78,7 @@ export function validateReadUrl(path, binary = false) {
 
 export function normalizeSession(input) {
   if (!input || !Array.isArray(input.cookies) || input.cookies.length > 30)
-    throw new ScombError('invalid_session', 'Playwright形式のセッションファイルが必要です。');
+    throw new ScombError('invalid_session', 'ScombZセッションの形式を確認できません。');
   const cookies = input.cookies
     .filter((c) => c?.domain?.replace(/^\./, '') === HOST)
     .map((c) => {
@@ -189,32 +186,48 @@ export class ScombClient {
     this.memory = new Map();
     this.session = options.session ? normalizeSession(options.session) : null;
     this.store = options.store ?? (env.DB ? new SessionStore(env) : null);
+    this.mobile =
+      options.mobileClient ??
+      (env.DB
+        ? new MobileAuthClient(env, {
+            ...(options.mobile ?? {}),
+            fetch: options.mobile?.fetch ?? options.fetch,
+          })
+        : null);
+  }
+  async refreshSession() {
+    if (!this.mobile || !this.store)
+      throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+    let bridge;
+    try {
+      bridge = await this.mobile.exchangeOtkey();
+    } catch (error) {
+      if (error instanceof ScombError && error.code === 'mobile_auth_required')
+        throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+      throw error;
+    }
+    if (!bridge.session)
+      throw new ScombError('auth_required', 'OTKEYからScombZセッションを取得できませんでした。管理画面から再ログインしてください。');
+    this.session = normalizeSession({ cookies: [bridge.session], origins: [] });
+    await this.store.save(this.session, { replace: true });
+    this.memory.clear();
+    return this.session;
   }
   async loadSession() {
     if (this.session) return this.session;
     const raw = await this.store?.load();
-    if (!raw)
-      throw new ScombError(
-        'auth_required',
-        'セッションが未登録です。接続ページでsession.jsonを読み込んでください。',
-      );
-    this.session = normalizeSession(raw);
-    return this.session;
+    if (raw) {
+      this.session = normalizeSession(raw);
+      return this.session;
+    }
+    return this.refreshSession();
   }
   async saveSession() {
     if (this.store && this.session) await this.store.save(this.session);
   }
-  async replaceSession(raw) {
-    if (!this.store)
-      throw new ScombError('storage_unavailable', 'セッション保存先を利用できません。');
-    this.session = normalizeSession(raw);
-    await this.html('/portal/home');
-    await this.store.save(this.session, { replace: true });
-    return { connected: true, checked_at: new Date().toISOString() };
-  }
-  async request(path, binary = false) {
-    const u = validateReadUrl(path, binary),
-      session = await this.loadSession();
+  async request(path, binary = false, allowRefresh = true) {
+    const u = validateReadUrl(path, binary);
+    let session = await this.loadSession();
     const now = Date.now() / 1000;
     const cookies = session.cookies.filter(
       (c) =>
@@ -222,8 +235,13 @@ export class ScombClient {
         (u.pathname === c.path ||
           u.pathname.startsWith(c.path.endsWith('/') ? c.path : c.path + '/')),
     );
-    if (!cookies.some((c) => c.name === 'SESSION'))
-      throw new ScombError('auth_required', '保存セッションの期限が切れています。');
+    if (!cookies.some((c) => c.name === 'SESSION')) {
+      if (allowRefresh) {
+        session = await this.refreshSession();
+        return this.request(path, binary, false);
+      }
+      throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+    }
     let response;
     try {
       response = await this.fetch(u.href, {
@@ -246,15 +264,25 @@ export class ScombClient {
     }
     if (response.status >= 300 && response.status < 400) {
       const target = new URL(response.headers.get('location') ?? '/login', u);
-      if (target.pathname === '/login' || target.hostname !== HOST)
-        throw new ScombError('auth_required', 'ScombZの再ログインが必要です。');
+      if (target.pathname === '/login' || target.hostname !== HOST) {
+        if (allowRefresh) {
+          await this.refreshSession();
+          return this.request(path, binary, false);
+        }
+        throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+      }
       throw new ScombError(
         'redirect_blocked',
         '自動遷移は行いません。要求した画面が現在利用可能か確認してください。',
       );
     }
-    if (response.status === 401)
-      throw new ScombError('auth_required', 'ScombZの再ログインが必要です。');
+    if (response.status === 401) {
+      if (allowRefresh) {
+        await this.refreshSession();
+        return this.request(path, binary, false);
+      }
+      throw new ScombError('auth_required', 'ScombZへのログインが必要です。管理画面を開いてログインしてください。');
+    }
     if (!response.ok)
       throw new ScombError('upstream_error', `ScombZがHTTP ${response.status}を返しました。`);
     const setCookies = response.headers.getSetCookie?.() ?? [];
@@ -281,7 +309,10 @@ export class ScombClient {
     const response = await this.request(path);
     const html = new TextDecoder().decode(await readBounded(response, 3 * 1024 * 1024));
     const state = pageState(html);
-    if (state.login) throw new ScombError('auth_required', 'ScombZの再ログインが必要です。');
+    if (state.login) {
+      await this.refreshSession();
+      return this.html(path);
+    }
     if (state.maintenance)
       throw new ScombError('temporarily_unavailable', 'ScombZの案内画面へ移動しています。');
     if (!state.header)
@@ -471,7 +502,7 @@ export class ScombClient {
       const bytes = await readBounded(response, 1024 * 1024);
       const state = pageState(new TextDecoder().decode(bytes));
       if (state.login)
-        throw new ScombError('auth_required', 'ファイル取得には再ログインが必要です。');
+        throw new ScombError('auth_required', 'ファイル取得にはScombZへの再ログインが必要です。');
       if (state.header)
         throw new ScombError('unavailable', 'ファイルではなくScombZの案内画面が返りました。');
       throw new ScombError('unavailable', 'ファイルではなくHTMLが返りました。');

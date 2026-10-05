@@ -152,6 +152,7 @@ export async function oauth(request, env, origin) {
       scopes_supported: ['scombz:read'],
       bearer_methods_supported: ['header'],
       resource_name: 'ScombZ Connector',
+      resource_documentation: origin + '/',
     });
   if (path === '/.well-known/oauth-authorization-server')
     return json({
