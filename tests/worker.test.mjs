@@ -316,7 +316,7 @@ test('PKCE exchange, code replay prevention and private MCP work in workerd', as
   const rows = await db.prepare('SELECT hash FROM oauth_tokens').all();
   assert.ok(!JSON.stringify(rows).includes(accessToken));
 });
-test('read_file returns a temporary scoped link and streams PDF only when downloaded', async () => {
+test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', async () => {
   const beforeRead = upstream;
   const response = await rpc(
     'read_file',
@@ -328,16 +328,21 @@ test('read_file returns a temporary scoped link and streams PDF only when downlo
   const value = payload.result.structuredContent;
   assert.equal(value.format, 'pdf');
   assert.equal(value.text, null);
-  assert.equal(value.bytes, null);
+  assert.equal(value.bytes, new TextEncoder().encode('%PDF-1.7 fixture').length);
   assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
   assert.equal(value.retention, 'not_stored_by_connector');
-  assert.equal(value.delivery, 'mcp_resource_link');
+  assert.equal(value.delivery, 'mcp_embedded_resource');
+  const embedded = payload.result.content.find((x) => x.type === 'resource');
+  assert.ok(embedded);
+  assert.equal(embedded.resource.uri, value.download_url);
+  assert.equal(embedded.resource.mimeType, 'application/pdf');
+  assert.equal(atob(embedded.resource.blob), '%PDF-1.7 fixture');
   const resourceLink = payload.result.content.find((x) => x.type === 'resource_link');
   assert.ok(resourceLink);
   assert.equal(resourceLink.uri, value.download_url);
   assert.equal(resourceLink.name, 'first.pdf');
   assert.equal(resourceLink.mimeType, 'application/pdf');
-  assert.equal(upstream, beforeRead + 1, 'read_file must not download the PDF body');
+  assert.ok(upstream > beforeRead, 'read_file must fetch the PDF body for embedding');
   assert.ok(value.download_url);
   assert.ok(!value.download_url.includes('private-fixture-cookie'));
 
