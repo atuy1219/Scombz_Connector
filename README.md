@@ -86,7 +86,7 @@ python scripts/package-skill.py
 
 - WorkerとD1は利用者本人のCloudflareアカウントにあります。作者への転送・テレメトリーは実装していません。
 - D1には認証の基準となるBearerと、最大6時間のSESSIONキャッシュをAES-256-GCMで暗号化して保存します。学籍番号・パスワード・OTKEYは保存しません。
-- OAuthは `scombz:read` のみ。DCR、S256 PKCE、短期間の認証コード、1時間のアクセストークン、30日間の更新トークンのローテーションに対応します。
+- 通常のOAuth権限は `scombz:read`。SESSION受け渡しには別途 `scombz:session` の本人承認が必要です。DCR、S256 PKCE、短期間の認証コード、1時間のアクセストークン、30日間の更新トークンのローテーションに対応します。
 - OAuthトークンはハッシュで保存し、`/mcp` のresource、期限、種別を検証します。管理キーでMCPを呼び出すことはできず、OAuthトークンで管理画面を操作することもできません。
 - 管理画面でOAuth接続の一括解除、ScombZからのログアウトができます。作者のChatGPTメールアドレスや `oai-authenticated-user-*` ヘッダーを認証に使いません。
 - DCRのリダイレクトは `https://chatgpt.com`・`https://chat.openai.com` とHTTPのlocalhost/ループバックのみ。その他のMCPクライアントを使う場合は、`src/oauth.mjs` の許可先を利用者が確認して変更します。
@@ -160,3 +160,13 @@ Deployボタンで作成した**利用者側のリポジトリ**にpushすると
 - [ChatGPTへのMCP登録](https://developers.openai.com/plugins/build/app-quickstart#connect-your-mcp-server-in-chatgpt)
 
 MIT License。教材・課題等の著作権は各権利者に帰属します。本リポジトリに大学教材や利用者のセッションは含みません。
+
+## ChatGPT側で取得・調査するための認証受け渡し
+
+`get_web_session`は、Connectorの認証で準備したScombZ WebのSESSION CookieだけをChatGPTへ返します。この機能はHTMLやJavaScriptの取得・解析を行いません。取得・調査はChatGPTの実行環境で行います。パスワード・Mobile API Bearer・OTKEY・管理キーは返しません。既存の読み取りツールは引き続き利用できます。
+
+既存の`scombz:read`権限だけではSESSIONを受け取れません。OAuthで`scombz:read scombz:session`を指定して再接続し、認証受け渡しを明記した承認画面で許可します。古いアクセストークン・更新トークンは読み取り権限のままで、更新時にも権限は増えません。SESSIONの取得自体にHTML取得は伴いません。不在・期限切れの場合はOTKEYで認証だけを更新します。直接アクセスで認証切れを確認した場合は`refresh=true`で再取得します。
+
+SESSIONは本人としてWebへアクセスする認証情報で、読み取り専用に制限できません。ChatGPT側で課題提出・受験開始・回答などを書き込む前は、毎回、対象と内容を本人に示し承認を得てください。この構成ではConnectorが直接通信を監視・制御できないため、毎回の確認はChatGPT側の操作手順で守ります。Cookieはメモリ内だけで使用し、会話本文・コマンド出力・共有ファイル・GitHubへ掲載せず、ScombZ以外へ送らず、リダイレクトを自動追跡しません。受け渡したCookieの大学側での失効時刻は保証できません。Connector側の認証を削除しても、既に渡したCookieが大学側で即時失効するとは限りません。
+
+適用時は`0004_session_export_scope.sql`をD1に適用してからWorkerを更新します。`npm run deploy`はこの順序で実行します。書き込み用の未検証PRとは独立した変更です。

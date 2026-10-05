@@ -13,7 +13,7 @@ const rpc = (body) =>
     body: JSON.stringify(body),
   });
 
-test('stateless MCP initialization and discovery advertise OAuth for all 11 tools', async () => {
+test('stateless MCP initialization and discovery advertise OAuth for all 12 tools', async () => {
   const init = await handle(
     rpc({
       jsonrpc: '2.0',
@@ -40,13 +40,18 @@ test('stateless MCP initialization and discovery advertise OAuth for all 11 tool
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 11);
+  assert.equal(list.result.tools.length, 12);
   const readFile = list.result.tools.find((tool) => tool.name === 'read_file');
   assert.deepEqual(Object.keys(readFile.inputSchema.properties).sort(), ['course_id', 'file_id']);
   assert.ok(readFile.description.includes('PDF全体を1回取得するツール'));
   for (const tool of list.result.tools) {
     assert.equal(tool.inputSchema.type, 'object');
-    assert.deepEqual(tool.securitySchemes, [{ type: 'oauth2', scopes: ['scombz:read'] }]);
+    assert.deepEqual(tool.securitySchemes, [
+      {
+        type: 'oauth2',
+        scopes: [tool.name === 'get_web_session' ? 'scombz:session' : 'scombz:read'],
+      },
+    ]);
     assert.deepEqual(tool._meta.securitySchemes, tool.securitySchemes);
   }
 });
