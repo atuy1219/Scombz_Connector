@@ -106,67 +106,27 @@ export async function handle(request, env, options = {}) {
         } catch {
           return json({ message: 'JSONの形式を確認できません。' }, 400);
         }
-        return json(await new MobileAuthClient(env, mobileOptions).login(body?.user, body?.password));
-      }
-      if (url.pathname === '/api/mobile/probe' && request.method === 'POST') {
-        if (request.headers.get('origin') !== origin)
-          return json({ message: 'この管理画面から操作してください。' }, 403);
         const mobile = new MobileAuthClient(env, mobileOptions);
-        let sessionid_state = { available: false, length: 0 };
-        try {
-          sessionid_state = await mobile.getSessionIdState();
-        } catch (error) {
-          if (!(error instanceof ScombError) || error.code !== 'mobile_upstream_error') throw error;
-          sessionid_state = { available: false, length: 0, unavailable: true };
-        }
-        const bridge = await mobile.exchangeOtkey();
-        let connected = false;
-        if (bridge.session) {
-          await client.replaceSession({ cookies: [bridge.session], origins: [] });
-          connected = true;
-        }
-        return json({
-          mobile_authenticated: true,
-          sessionid_state,
-          otkey_received: bridge.otkey_received,
-          web_session_acquired: !!bridge.session,
-          connected,
-          diagnostics: bridge.diagnostics,
-          fallback_recommended: !connected,
-        });
+        const login = await mobile.login(body?.user, body?.password);
+        await client.refreshSession();
+        const status = await client.connection();
+        return json({ ...login, ...status, auth_method: 'mobile_api_otkey' });
       }
       if (url.pathname === '/api/mobile' && request.method === 'DELETE') {
         if (request.headers.get('origin') !== origin)
           return json({ message: 'この管理画面から操作してください。' }, 403);
         await new MobileAuthStore(env).clear();
-        return json({ deleted: true });
+        await env.DB.prepare('DELETE FROM session').run();
+        return json({ deleted: true, connected: false });
       }
       if (url.pathname === '/api/status' && request.method === 'GET')
         return json(await client.connection());
-      if (url.pathname === '/api/connection' && request.method === 'POST') {
-        if (request.headers.get('origin') !== origin)
-          return json({ message: 'この管理画面から操作してください。' }, 403);
-        if (!request.headers.get('content-type')?.startsWith('application/json'))
-          return json({ message: 'JSONファイルを指定してください。' }, 415);
-        let raw;
-        try {
-          raw = await readBody(request);
-        } catch {
-          return json({ message: 'File too large' }, 413);
-        }
-        let session;
-        try {
-          session = JSON.parse(raw);
-        } catch {
-          return json({ message: 'JSONの形式を確認できません。' }, 400);
-        }
-        return json(await client.replaceSession(session));
-      }
       if (url.pathname === '/api/connection' && request.method === 'DELETE') {
         if (request.headers.get('origin') !== origin)
           return json({ message: 'この管理画面から操作してください。' }, 403);
         await env.DB.batch([
           env.DB.prepare('DELETE FROM session'),
+          env.DB.prepare('DELETE FROM mobile_auth'),
           env.DB.prepare('DELETE FROM oauth_codes'),
           env.DB.prepare('DELETE FROM oauth_tokens'),
         ]);
