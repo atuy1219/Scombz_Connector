@@ -485,7 +485,7 @@ export async function mcpResponse(request, env, options = {}) {
   specific(
     'prepare_survey_answers',
     'アンケート回答の確認を準備',
-    'アンケートの回答を暗号化した下書きにします。本人が今回の回答と送信先を確認URLで承認するまで送信しません。分岐・未検証形式は停止します。',
+    'アンケート回答を準備し、本人が確認URLで承認するまで送信しません。対応する科目アンケートは回答確認後に別の最終提出承認URLを返します。分岐・未検証形式は停止します。',
     {
       course_id: id.optional(),
       survey_id: id,
@@ -505,7 +505,7 @@ export async function mcpResponse(request, env, options = {}) {
   specific(
     'get_submission_status',
     '承認操作の状態',
-    '本人の下書き・送信結果・次に必要な確認を読みます。HTTP成功だけで提出完了と判定せず、結果不明でも自動再送しません。',
+    '本人の下書き・送信結果・次の承認を読みます。アンケート最終送信後は公開回答結果と回答日時をGETで再確認します。HTTP成功だけで完了と判定せず、POSTを再送しません。',
     { draft_id: draftId },
     (a) => submissionStatus(env, client, a.draft_id),
   );

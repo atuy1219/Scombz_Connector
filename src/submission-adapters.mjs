@@ -2,6 +2,11 @@ import { load } from 'cheerio/slim';
 import { BASE, document, parseDetail } from './parsers.mjs';
 import { ScombError } from './errors.mjs';
 import { nativeForms, saveDraft, resumeDraft } from './writes.mjs';
+import {
+  surveyInputContract,
+  selectedSurveySummary,
+  surveyPageSummary,
+} from './survey-completion.mjs';
 export const WRITE_TOOLS = new Set([
   'prepare_assignment_submission',
   'prepare_quiz_start',
@@ -43,7 +48,7 @@ function identities($, form, target) {
 
 // Adapt only observed student forms. Scripts are parsed as text, never evaluated.
 export function submissionForms(html, source, target, phase = 'initial') {
-  if (phase === 'continuation' && target.kind !== 'quiz')
+  if (phase === 'continuation' && target.kind === 'assignment')
     unsupported('最終確認画面の送信契約は未検証です。原画面で内容と提出状態を確認してください。');
   const { $ } = document(html);
   const formId =
@@ -75,6 +80,56 @@ export function submissionForms(html, source, target, phase = 'initial') {
     (form.attr('method') ?? '').toLowerCase() !== 'post'
   )
     unsupported('確認できた送信先・HTTPメソッドと異なります。');
+
+  if (target.kind === 'survey' && phase === 'continuation') {
+    if (
+      !target.course_id ||
+      target.form?.phase !== 'survey_form' ||
+      !target.form.survey_contract?.length ||
+      !Array.isArray(target.entries)
+    )
+      unsupported('承認済みのアンケート入力内容がありません。');
+    const allowed = new Set(['_cid', '_csrf', '_method', 'idnumber', 'surveyId']);
+    const inputs = form.find('input');
+    if (
+      inputs.length !== allowed.size ||
+      form.attr('onsubmit') ||
+      form.find('textarea,select,button,[onsubmit]').length ||
+      inputs
+        .toArray()
+        .some((e) => $(e).attr('type') !== 'hidden' || !allowed.has($(e).attr('name'))) ||
+      [...allowed].some(
+        (name) => inputs.filter((_, e) => $(e).attr('name') === name).length !== 1,
+      ) ||
+      value($, form, '_method') !== 'put' ||
+      !value($, form, '_cid') ||
+      value($, form, '_cid') !== target.form.hidden.find(([n]) => n === '_cid')?.[1]
+    )
+      unsupported('最終確認フォームのメソッド・画面ID・項目を確認できません。');
+    const anchors = form.find('a[onclick]');
+    if (
+      anchors.length !== 1 ||
+      form.find('[onclick]').length !== anchors.length ||
+      text(anchors.text()) !== '提出する' ||
+      anchors.attr('onclick')?.replace(/\s/g, '') !== "$('#surveysTakeForm').submit();"
+    )
+      unsupported('検証した最終提出ボタンではありません。');
+    const summary = surveyPageSummary($, form, 'confirm');
+    const expectedSummary = selectedSurveySummary(target.form.survey_contract, target.entries);
+    if (JSON.stringify(summary) !== JSON.stringify(expectedSummary))
+      unsupported('ScombZの確認内容が、今回承認した回答と一致しません。');
+    return [
+      {
+        action: route.href,
+        phase: 'survey_final',
+        hidden: inputs.toArray().map((e) => [$(e).attr('name'), $(e).attr('value')]),
+        fields: [],
+        buttons: [{ name: '', value: '', label: 'アンケートを最終提出する' }],
+        expected_summary: summary,
+        context: '今回の最終提出内容（変更不可）:\n' + JSON.stringify(summary, null, 2),
+      },
+    ];
+  }
 
   if (target.kind === 'quiz' && phase === 'initial') {
     if (
@@ -257,6 +312,7 @@ export function submissionForms(html, source, target, phase = 'initial') {
           : 'quiz_answers'
         : target.kind + '_form';
     f.required_groups = [];
+    if (target.kind === 'survey') f.survey_contract = surveyInputContract($, form);
     form.find('.block').each((_, block) => {
       if (!text($(block).find('.block-title,.highlight-txt').text()).includes('[必須]')) return;
       const matrixRows = $(block)

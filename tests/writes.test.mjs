@@ -423,7 +423,7 @@ test('text assignments require explicit new text and stop at unverified final pa
 });
 
 test('sequential survey initialization sets flags without executing scripts and rejects branch jumps', () => {
-  const html = `<form id="surveysTakeForm" action="/lms/course/surveys/take" method="post"><input name="_csrf" type="hidden" value="secret"><input name="idnumber" type="hidden" value="c"><input name="surveyId" type="hidden" value="r"><input name="takeFlag" type="hidden" value="1"><div class="block"><div class="question_itme survey_itme_1"><div class="highlight-txt">[必須]</div><div class="branchFlag" data-branchflag="true"></div><input class="enableSurveyItem" name="surveyDetail[0].enableSurveyItem" value="" type="hidden"><input class="branchType" value="radio" type="hidden"><div class="surveys-contents-quetison-area"><label class="branchNo" data-nextno="0" data-no="1"></label><input name="answerDetail[0].answerItem[0].answer" type="radio" value="1"><div class="break">合成の選択肢</div></div></div></div><a onclick="$(&apos;#surveysTakeForm&apos;).submit();">確認画面へ</a></form><script>function setBranch(){} function loadSetBranch(){} $("#takeFlag").val("0"); throw new Error('must not execute');</script>`;
+  const html = `<form id="surveysTakeForm" action="/lms/course/surveys/take" method="post"><input name="_csrf" type="hidden" value="secret"><input name="idnumber" type="hidden" value="c"><input name="surveyId" type="hidden" value="r"><input name="takeFlag" type="hidden" value="1"><div class="block"><div class="question_itme survey_itme_1"><div id="surveyTakeItemBodyEditor0">合成設問</div><div class="highlight-txt">[必須]</div><div class="branchFlag" data-branchflag="true"></div><input class="enableSurveyItem" name="surveyDetail[0].enableSurveyItem" value="" type="hidden"><input class="branchType" value="radio" type="hidden"><div class="surveys-contents-quetison-area"><label class="branchNo" data-nextno="0" data-no="1"></label><input name="answerDetail[0].answerItem[0].answer" type="radio" value="1"><div class="break">合成の選択肢</div></div></div></div><a onclick="$(&apos;#surveysTakeForm&apos;).submit();">確認画面へ</a></form><script>function setBranch(){} function loadSetBranch(){} $("#takeFlag").val("0"); throw new Error('must not execute');</script>`;
   const forms = submissionForms(html, source, { ...target, kind: 'survey' });
   assert.ok(
     forms[0].hidden.some(([n, v]) => n === 'surveyDetail[0].enableSurveyItem' && v === '1'),
@@ -455,4 +455,166 @@ test('required survey matrix rows require an answer in every row and retain row/
     }).length,
     2,
   );
+});
+
+const surveyInputHtml = `<form id="surveysTakeForm" action="/lms/course/surveys/take" method="post"><input type="hidden" name="_cid" value="private-cid"><input type="hidden" name="_csrf" value="private-token"><input type="hidden" name="idnumber" value="c"><input type="hidden" name="surveyId" value="r"><div class="question_itme"><div id="surveyTakeItemBodyEditor0">合成設問</div><div class="surveys-contents-quetison-area"><input name="answerDetail[0].answerItem[0].answer" type="radio" value="1"><div class="break">選択肢A</div></div><div class="surveys-contents-quetison-area"><input name="answerDetail[0].answerItem[0].answer" type="radio" value="2"><div class="break">選択肢B</div></div></div><a onclick="$(&apos;#surveysTakeForm&apos;).submit();">確認画面に進む</a></form>`;
+const surveyFields = { 'answerDetail[0].answerItem[0].answer': '1' };
+function finalSurveyHtml(answer = '選択肢A') {
+  return `<form id="surveysTakeForm" action="/lms/course/surveys/take" method="post"><input type="hidden" name="_cid" value="private-cid"><input type="hidden" name="_csrf" value="private-token"><input type="hidden" name="_method" value="put"><input type="hidden" name="idnumber" value="c"><input type="hidden" name="surveyId" value="r"><div class="question_itme"><div id="surveyTakeConfirmItemBodyEditor0">合成設問</div><div class="result-list"><div id="answerRadioBodyEditor_0_0">${answer}</div></div></div><a onclick="$(&apos;#surveysTakeForm&apos;).submit();">提出する</a></form>`;
+}
+function receiptHtml(answer = '選択肢A', date = jstDate()) {
+  return `<form id="surveysTakeResultForm"><input name="idnumber" value="c"><input name="surveyId" value="r"><div class="contents-detail"><div class="contents-header">回答日</div><div class="contents-input-area">${date}</div></div><div class="question_itme"><div id="surveyTakeResultItemBodyEditor0">合成設問</div><div class="result-list"><div id="answerRadioBodyEditor_0_0">${answer}</div></div></div></form>`;
+}
+function jstDate(ms = Date.now()) {
+  return new Date(ms + 9 * 3600000)
+    .toISOString()
+    .slice(0, 19)
+    .replaceAll('-', '/')
+    .replace('T', ' ');
+}
+function surveyMock(outcome = 'ok', before = null) {
+  let receipt = before,
+    posts = 0,
+    finals = 0,
+    reads = 0;
+  const mock = {
+    ...client,
+    course: async () => ({
+      contents: [
+        {
+          kind: 'survey',
+          content_id: 'r',
+          routes: receipt ? ['/lms/course/surveys/takeresult?idnumber=c&surveyId=r'] : [],
+        },
+      ],
+    }),
+    html: async (path) => {
+      reads++;
+      return path.includes('takeresult') ? receipt : '<div id="page_head"></div>';
+    },
+    fetch: async (url, options) => {
+      posts++;
+      assert.equal(options.method, 'POST');
+      assert.equal(options.redirect, 'manual');
+      assert.equal(options.headers.Cookie, 'SESSION=fixture');
+      if (options.body.get('_method') !== 'put') return new Response(finalSurveyHtml());
+      finals++;
+      if (outcome === 'ok' || outcome === 'unknown-done') receipt = receiptHtml();
+      if (outcome === 'wrong') receipt = receiptHtml('選択肢B');
+      if (outcome.startsWith('unknown')) throw Error('connection interrupted');
+      return new Response(null, {
+        status: 303,
+        headers: { Location: 'https://evil.example/no-follow' },
+      });
+    },
+  };
+  return {
+    client: mock,
+    setReceipt: (r) => {
+      receipt = r;
+    },
+    counts: () => ({ posts, finals, reads }),
+  };
+}
+async function preparedSurvey(mock) {
+  const s = {
+    ...target,
+    kind: 'survey',
+    forms: submissionForms(surveyInputHtml, source, { ...target, kind: 'survey' }),
+  };
+  return saveDraft(env, mock.client, s, 0, 0, surveyFields, origin);
+}
+test('survey confirmation matches the approved answers, CID and exact method before offering final approval', () => {
+  const form = submissionForms(surveyInputHtml, source, { ...target, kind: 'survey' })[0];
+  const data = { ...target, kind: 'survey', form, entries: Object.entries(surveyFields) };
+  const final = submissionForms(finalSurveyHtml(), source, data, 'continuation')[0];
+  assert.equal(final.phase, 'survey_final');
+  assert.deepEqual(final.fields, []);
+  assert.ok(final.hidden.some(([n, v]) => n === '_method' && v === 'put'));
+  assert.equal(final.expected_summary[0].answers[0], '選択肢A');
+  for (const html of [
+    finalSurveyHtml('選択肢B'),
+    finalSurveyHtml().replace('private-cid', 'different-cid'),
+    finalSurveyHtml().replace('value="put"', 'value="delete"'),
+    finalSurveyHtml().replace('<form ', '<form onsubmit="evil()" '),
+    finalSurveyHtml().replace(
+      '<a onclick=',
+      '<input name="unknown" type="hidden" value="x"><a onclick=',
+    ),
+  ])
+    assert.throws(() => submissionForms(html, source, data, 'continuation'));
+  assert.throws(() =>
+    submissionForms(finalSurveyHtml(), source, { ...data, course_id: null }, 'continuation'),
+  );
+});
+test('survey preview cannot finalize; another approval submits once and verifies the public receipt', async () => {
+  const mock = surveyMock(),
+    draft = await preparedSurvey(mock);
+  assert.equal(mock.counts().posts, 0);
+  const preview = await (
+    await confirmWrite(req(draft.draft_id), env, mock.client, draft.draft_id, origin)
+  ).json();
+  assert.equal(preview.status, 'next_confirmation_required');
+  assert.equal(mock.counts().finals, 0);
+  assert.equal(preview.next.confirmed_answers[0].answers[0], '選択肢A');
+  assert.ok(!JSON.stringify(preview).includes('private-token'));
+  await confirmWrite(
+    req(preview.next.draft_id, { step: 'review' }),
+    env,
+    mock.client,
+    preview.next.draft_id,
+    origin,
+  );
+  assert.equal(mock.counts().finals, 0);
+  const done = await (
+    await confirmWrite(req(preview.next.draft_id), env, mock.client, preview.next.draft_id, origin)
+  ).json();
+  assert.equal(done.status, 'completed');
+  assert.equal(mock.counts().finals, 1);
+  assert.ok(done.answered_at);
+  assert.ok(!done.verification);
+  await assert.rejects(
+    confirmWrite(req(preview.next.draft_id), env, mock.client, preview.next.draft_id, origin),
+  );
+  assert.equal(
+    (await submissionStatus(env, mock.client, preview.next.draft_id)).status,
+    'completed',
+  );
+  assert.equal(mock.counts().finals, 1);
+});
+test('old receipts, mismatched answers and unadvertised results cannot claim completion; status rechecks GET only', async () => {
+  for (const outcome of ['pending', 'wrong', 'unchanged']) {
+    const mock = surveyMock(
+      outcome,
+      outcome === 'unchanged' ? receiptHtml('選択肢A', jstDate(Date.now() - 86400000)) : null,
+    );
+    const draft = await preparedSurvey(mock);
+    const preview = await (
+      await confirmWrite(req(draft.draft_id), env, mock.client, draft.draft_id, origin)
+    ).json();
+    const id = preview.next.draft_id;
+    const result = await (await confirmWrite(req(id), env, mock.client, id, origin)).json();
+    assert.equal(result.status, 'verification_required');
+    mock.setReceipt(receiptHtml());
+    const done = await submissionStatus(env, mock.client, id);
+    assert.equal(done.status, 'completed');
+    assert.equal(mock.counts().finals, 1);
+    assert.ok(!done.verification);
+  }
+});
+test('unknown final network outcomes can be verified without replaying the final POST', async () => {
+  for (const outcome of ['unknown-done', 'unknown-pending']) {
+    const mock = surveyMock(outcome),
+      draft = await preparedSurvey(mock);
+    const preview = await (
+      await confirmWrite(req(draft.draft_id), env, mock.client, draft.draft_id, origin)
+    ).json();
+    const id = preview.next.draft_id;
+    const result = await (await confirmWrite(req(id), env, mock.client, id, origin)).json();
+    assert.equal(result.status, outcome === 'unknown-done' ? 'completed' : 'verification_required');
+    await assert.rejects(confirmWrite(req(id), env, mock.client, id, origin));
+    mock.setReceipt(receiptHtml());
+    assert.equal((await submissionStatus(env, mock.client, id)).status, 'completed');
+    assert.equal(mock.counts().finals, 1);
+  }
 });

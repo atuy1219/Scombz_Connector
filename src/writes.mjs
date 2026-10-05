@@ -4,6 +4,7 @@ import { ScombError } from './errors.mjs';
 import { random, encrypt, decrypt, digest, equalSecret } from './crypto.mjs';
 import { escape, htmlResponse, json } from './oauth.mjs';
 import { submissionForms } from './submission-adapters.mjs';
+import { surveyReceipt, verifySurvey } from './survey-completion.mjs';
 
 const fail = (message) => {
   throw new ScombError('unsupported_write_form', message);
@@ -236,6 +237,7 @@ export async function saveDraft(
     target: snapshot.title,
     operation: button.label,
     answers: entries,
+    ...(form.expected_summary ? { confirmed_answers: form.expected_summary } : {}),
     files: form.fields
       .filter((f) => f.type === 'file')
       .map((f) => ({ name: f.name, label: f.label, required: f.required })),
@@ -265,11 +267,26 @@ export async function submissionStatus(env, client, id) {
     row.owner !== (client.authentication ?? (await digest(JSON.stringify(session.cookies))))
   )
     throw new ScombError('not_found', '本人の提出操作が見つかりません。');
+  let result = row.result ? JSON.parse(await decrypt(env, row.result)) : {};
+  if (result.verification && result.status !== 'completed') {
+    result = { ...result, ...(await verifySurvey(client, result.verification)) };
+    const changed = await env.DB.prepare('UPDATE write_drafts SET result=? WHERE id=? AND result=?')
+      .bind(await encrypt(env, JSON.stringify(result)), id, row.result)
+      .run();
+    if (changed.meta.changes !== 1) {
+      const latest = await env.DB.prepare('SELECT result FROM write_drafts WHERE id=?')
+        .bind(id)
+        .first();
+      if (!latest) throw new ScombError('not_found', '本人の提出操作が見つかりません。');
+      result = latest.result ? JSON.parse(await decrypt(env, latest.result)) : {};
+    }
+  }
+  const { verification, ...publicResult } = result;
   return {
     draft_id: id,
     status: row.state,
     expired: row.expires_at <= Date.now() / 1000,
-    ...(row.result ? JSON.parse(await decrypt(env, row.result)) : {}),
+    ...publicResult,
   };
 }
 async function draft(env, id) {
@@ -330,7 +347,7 @@ export async function confirmWrite(request, env, client, id, origin) {
       )
       .join('');
     return htmlResponse(
-      `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>送信前の最終確認</title><style>body{font:16px system-ui;color:#17324d;background:#f2f5f9;max-width:720px;margin:40px auto;padding:24px;line-height:1.7}form,pre{background:white;border:1px solid #d7e0ec;padding:20px;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere}button,input{font:inherit;margin:12px 0;padding:10px}button{display:block;background:#173e68;color:white;border:0;border-radius:6px}input[type=password]{width:90%}</style><h1>送信前の最終確認</h1><p>提出先: ${escape(data.title)} (${escape(data.course_id)})</p><p>操作: ${escape(data.button.label)}</p><p>元画面: ${escape(data.source_url)}</p><pre>${escape(data.form.context)}</pre><h2>今回送る回答</h2><pre>${escape(JSON.stringify(data.entries, null, 2))}</pre><p>受験開始・再受験は制限時間や受験回数に影響する場合があります。次の確認画面が返る場合は、そこでも再度承認が必要です。</p><form method="post" enctype="multipart/form-data" action="/write/${escape(id)}"><input type="hidden" name="admin_token" value="${escape(input.get('admin_token'))}">${fileInputs}<label><input type="checkbox" name="approved" value="yes" required>上記の提出先・回答と、選択した添付ファイルを確認しました</label><button name="step" value="commit">${escape(data.button.label)}を承認して送信</button></form></html>`,
+      `<!doctype html><html lang="ja"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>送信前の最終確認</title><style>body{font:16px system-ui;color:#17324d;background:#f2f5f9;max-width:720px;margin:40px auto;padding:24px;line-height:1.7}form,pre{background:white;border:1px solid #d7e0ec;padding:20px;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere}button,input{font:inherit;margin:12px 0;padding:10px}button{display:block;background:#173e68;color:white;border:0;border-radius:6px}input[type=password]{width:90%}</style><h1>送信前の最終確認</h1><p>提出先: ${escape(data.title)} (${escape(data.course_id)})</p><p>操作: ${escape(data.button.label)}</p><p>元画面: ${escape(data.source_url)}</p><pre>${escape(data.form.context)}</pre><h2>今回送る回答</h2><pre>${escape(JSON.stringify(data.form.expected_summary ?? data.entries, null, 2))}</pre><p>受験開始・再受験は制限時間や受験回数に影響する場合があります。次の確認画面が返る場合は、そこでも再度承認が必要です。</p><form method="post" enctype="multipart/form-data" action="/write/${escape(id)}"><input type="hidden" name="admin_token" value="${escape(input.get('admin_token'))}">${fileInputs}<label><input type="checkbox" name="approved" value="yes" required>上記の提出先・回答と、選択した添付ファイルを確認しました</label><button name="step" value="commit">${escape(data.button.label)}を承認して送信</button></form></html>`,
     );
   }
   if (input.get('step') !== 'commit' || input.get('approved') !== 'yes')
@@ -384,6 +401,17 @@ export async function confirmWrite(request, env, client, id, origin) {
       }
     }
   });
+  const verification =
+    data.form.phase === 'survey_final'
+      ? {
+          kind: 'survey',
+          course_id: data.course_id,
+          content_id: data.content_id,
+          expected: data.form.expected_summary,
+          before: await surveyReceipt(client, data),
+          started_at: Date.now(),
+        }
+      : null;
   // Atomic one-shot claim BEFORE sending. Network errors never unlock or auto-retry.
   const claimed = await env.DB.prepare(
     "UPDATE write_drafts SET state='sending' WHERE id=? AND state='pending' AND expires_at>?",
@@ -420,6 +448,7 @@ export async function confirmWrite(request, env, client, id, origin) {
     await env.DB.prepare("UPDATE write_drafts SET state='unknown',data='' WHERE id=?")
       .bind(id)
       .run();
+    if (verification) return finishSurvey(env, client, id, verification, { transport: 'unknown' });
     return json(
       {
         status: 'unknown',
@@ -430,6 +459,12 @@ export async function confirmWrite(request, env, client, id, origin) {
     );
   }
   await env.DB.prepare("UPDATE write_drafts SET state='sent',data='' WHERE id=?").bind(id).run();
+  if (verification) {
+    try {
+      await response.body?.cancel();
+    } catch {}
+    return finishSurvey(env, client, id, verification, { http_status: response.status });
+  }
   if (!response.ok) {
     await response.body?.cancel();
     const result = {
@@ -563,4 +598,10 @@ async function recordResult(env, id, result) {
   await env.DB.prepare('UPDATE write_drafts SET result=? WHERE id=?')
     .bind(await encrypt(env, JSON.stringify(result)), id)
     .run();
+}
+async function finishSurvey(env, client, id, verification, transport) {
+  const verified = await verifySurvey(client, verification);
+  const result = { ...transport, ...verified, verification };
+  await recordResult(env, id, result);
+  return json({ ...transport, ...verified });
 }
