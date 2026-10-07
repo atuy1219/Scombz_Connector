@@ -46,7 +46,7 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
         },
       };
     });
-    const host = `<!doctype html><iframe src="/widget" style="width:460px;height:440px;border:0"></iframe>
+    const host = `<!doctype html><meta charset="utf-8"><iframe src="/widget" style="width:460px;height:440px;border:0"></iframe>
       <script>
       window.messages=[]; window.contexts=[]; window.initializations=[];
       addEventListener('message', e => {
@@ -64,7 +64,7 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
       });</script>`;
     await page.route('https://host.test/**', (route) =>
       route.fulfill({
-        contentType: 'text/html',
+        contentType: 'text/html; charset=utf-8',
         body: new URL(route.request().url()).pathname === '/widget' ? FILE_WIDGET_HTML : host,
       }),
     );
