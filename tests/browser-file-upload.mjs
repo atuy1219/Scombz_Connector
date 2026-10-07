@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { FILE_WIDGET_HTML } from '../src/file-widget.mjs';
 
-// Real Chromium + real MCP Apps SDK; ChatGPT uploadFile is a fixture.
+// Real Chromium + real MCP Apps SDK; ChatGPT file APIs are fixtures.
 // Actual ChatGPT PDF ingestion remains an explicit manual acceptance test.
-test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, and sends a user-triggered check', async () => {
+test('inline widget auto-uploads a PDF, links it into model context, and triggers verification', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
@@ -30,6 +30,7 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
       if (location.pathname !== '/widget') return;
       window.uploads = [];
       window.savedStates = [];
+      window.downloadUrlCalls = [];
       window.openai = {
         async uploadFile(file, options) {
           window.uploads.push({
@@ -40,6 +41,10 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
             library: options.library,
           });
           return { fileId: 'file-browser-fixture' };
+        },
+        async getFileDownloadUrl({ fileId }) {
+          window.downloadUrlCalls.push(fileId);
+          return { downloadUrl: 'https://files.oaiusercontent.test/file-browser-fixture' };
         },
         setWidgetState(state) {
           window.savedStates.push(state);
@@ -55,7 +60,7 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
         if(m.method==='ui/initialize') {
           window.initializations.push(m.params);
           reply({protocolVersion:m.params.protocolVersion,hostInfo:{name:'browser-fixture',version:'1'},
-            hostCapabilities:{serverTools:{},message:{text:{}},updateModelContext:{text:{}}},
+            hostCapabilities:{serverTools:{},message:{text:{}},updateModelContext:{text:{},resourceLink:{}}},
             hostContext:{displayMode:'inline',availableDisplayModes:['inline'],theme:'light'}});
         } else if(m.method==='ui/notifications/initialized') {
           e.source.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:${JSON.stringify(result)}},e.origin);
@@ -77,10 +82,11 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
     );
     await page.goto('https://host.test/');
     const frame = page.frameLocator('iframe');
-    await frame.locator('#upload:not([disabled])').waitFor();
-    await frame.locator('#library').check();
-    await frame.locator('#upload').click();
-    await frame.locator('#verify:not([hidden])').waitFor();
+    await page.waitForFunction(() => {
+      const iframe = document.querySelector('iframe');
+      return !!iframe?.contentWindow?.uploads?.length;
+    });
+    await page.waitForFunction(() => window.contexts.length === 1 && window.messages.length === 1);
     const ui = page.frames().find((f) => f.url().endsWith('/widget'));
     const uploads = await ui.evaluate(() => window.uploads);
     assert.deepEqual(uploads, [
@@ -89,27 +95,28 @@ test('inline widget connects through the MCP Apps bridge, uploads a whole PDF, a
         name: '講義.pdf',
         mime: 'application/pdf',
         signature: '%PDF-',
-        library: true,
+        library: false,
       },
     ]);
+    assert.deepEqual(await ui.evaluate(() => window.downloadUrlCalls), ['file-browser-fixture']);
     assert.equal(await frame.locator('#filename').textContent(), '講義.pdf');
-    assert.ok((await frame.locator('#status').textContent()).includes('未確認'));
-    assert.equal(await page.evaluate(() => window.messages.length), 0);
+    assert.ok((await frame.locator('#status').textContent()).includes('読み取り確認を開始'));
     assert.deepEqual(
       await page.evaluate(() => window.initializations[0].appCapabilities.availableDisplayModes),
       ['inline'],
     );
-    const state = await ui.evaluate(() => window.savedStates[0]);
-    assert.equal(state.modelContent.model_readability, 'unverified');
+    const context = await page.evaluate(() => window.contexts[0]);
+    const link = context.content.find((x) => x.type === 'resource_link');
+    assert.equal(link.uri, 'https://files.oaiusercontent.test/file-browser-fixture');
+    assert.equal(link.name, '講義.pdf');
+    assert.equal(link.mimeType, 'application/pdf');
+    assert.ok((await page.evaluate(() => window.messages[0].content[0].text)).includes('2ページ目'));
+    const state = await ui.evaluate(() => window.savedStates.at(-1));
+    assert.equal(state.modelContent.model_readability, 'verification_requested');
+    assert.equal(state.modelContent.model_context_linked, true);
     assert.ok(!JSON.stringify(state).includes('ticket='));
-    assert.ok(!Object.hasOwn(state, 'imageIds'));
-    await frame.locator('#verify').click();
-    await page.waitForFunction(() => window.messages.length === 1);
-    assert.ok(
-      (await page.evaluate(() => window.messages[0].content[0].text)).includes('2ページ目'),
-    );
-    const box = await frame.locator('#upload').boundingBox();
-    assert.ok(box.width > 100 && box.height > 30, 'inline action remains visible');
+    assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
+    assert.equal(await frame.locator('#upload').isHidden(), true);
   } finally {
     await browser.close();
   }
