@@ -643,7 +643,7 @@ test('chat widget keeps scoped links private, serves its UI and authenticates be
   assert.equal(upstream, beforeRead);
 });
 
-test('widget CORS is restricted to ticketed file GETs and does not open admin or MCP routes', async () => {
+test('ticketed file CORS follows the browser Origin without opening admin or MCP routes', async () => {
   const payload = await (
     await rpc(
       'open_file_in_chat',
@@ -653,28 +653,30 @@ test('widget CORS is restricted to ticketed file GETs and does not open admin or
   ).json();
   const url = new URL(payload.result._meta.file_transfer.download_url);
   const path = url.pathname + url.search;
-  const widgetOrigin = 'https://web-sandbox.oaiusercontent.com';
-  const headers = { Origin: widgetOrigin };
+  const browserOrigins = [
+    'https://web-sandbox.oaiusercontent.com',
+    'https://chatgpt.com',
+    'https://future-sandbox.example',
+  ];
   const before = upstream;
-  const preflight = await req(path, { method: 'OPTIONS', headers });
-  assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get('access-control-allow-origin'), widgetOrigin);
-  assert.equal(upstream, before);
-  const body = await req(path, { headers });
-  assert.equal(body.status, 200);
-  assert.equal(body.headers.get('access-control-allow-origin'), widgetOrigin);
-  assert.equal(body.headers.get('access-control-allow-credentials'), null);
-  assert.equal(body.headers.get('vary'), 'Origin');
-  assert.equal(await body.text(), '%PDF-1.7 fixture');
-  for (const foreign of [
-    'https://evil.example',
-    'https://web-sandbox.oaiusercontent.com.evil.example',
-    'null',
-  ]) {
-    const denied = await req(path, { headers: { Origin: foreign } });
-    assert.equal(denied.status, 403);
-    assert.equal(denied.headers.get('access-control-allow-origin'), null);
+  for (const browserOrigin of browserOrigins) {
+    const headers = { Origin: browserOrigin };
+    const preflight = await req(path, { method: 'OPTIONS', headers });
+    assert.equal(preflight.status, 204);
+    assert.equal(preflight.headers.get('access-control-allow-origin'), browserOrigin);
+    assert.equal(preflight.headers.get('access-control-allow-credentials'), null);
+
+    const body = await req(path, { headers });
+    assert.equal(body.status, 200);
+    assert.equal(body.headers.get('access-control-allow-origin'), browserOrigin);
+    assert.equal(body.headers.get('access-control-allow-credentials'), null);
+    assert.equal(body.headers.get('vary'), 'Origin');
+    assert.equal(await body.text(), '%PDF-1.7 fixture');
   }
+  assert.equal(upstream, before + browserOrigins.length * 3);
+
+  const widgetOrigin = browserOrigins[0];
+  const headers = { Origin: widgetOrigin };
   assert.equal(
     (await req('/api/status', { headers: { ...adminHeaders, Origin: widgetOrigin } })).status,
     403,
@@ -683,17 +685,28 @@ test('widget CORS is restricted to ticketed file GETs and does not open admin or
     (await post('/mcp', {}, { ...headers, Authorization: 'Bearer ' + accessToken })).status,
     403,
   );
+
   const stripped = url.pathname + '?file_id=material%3Am%3Ar';
   const beforeInvalid = upstream;
-  for (const method of ['GET', 'OPTIONS']) {
-    const denied = await req(stripped, {
-      method,
-      headers: { ...headers, Authorization: 'Bearer ' + bindings.ADMIN_TOKEN },
-    });
-    assert.equal(denied.status, 401);
-    assert.equal(denied.headers.get('access-control-allow-origin'), widgetOrigin);
+  for (const browserOrigin of browserOrigins) {
+    for (const method of ['GET', 'OPTIONS']) {
+      const denied = await req(stripped, {
+        method,
+        headers: {
+          Origin: browserOrigin,
+          Authorization: 'Bearer ' + bindings.ADMIN_TOKEN,
+        },
+      });
+      assert.equal(denied.status, 401);
+      assert.equal(denied.headers.get('access-control-allow-origin'), browserOrigin);
+    }
   }
   assert.equal(upstream, beforeInvalid);
+
+  const opaque = await req(path, { headers: { Origin: 'null' } });
+  assert.equal(opaque.status, 403);
+  assert.equal(opaque.headers.get('access-control-allow-origin'), null);
+
   upstreamMode = 'large';
   try {
     const tooLarge = await req(path, { headers });
