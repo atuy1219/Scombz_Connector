@@ -164,7 +164,7 @@ el('upload').onclick = async () => {
         : String(error);
     // Signed download URLs contain short-lived tickets. Never expose them in diagnostics.
     const detail = rawDetail
-      .replace(/https?:\\/\\/\\S+/g, '[URL]')
+      .replace(/https?:\/\/\S+/g, '[URL]')
       .replace(/ticket=[^\\s&]+/gi, 'ticket=[REDACTED]')
       .slice(0, 500);
     const known = messages[error?.message];
