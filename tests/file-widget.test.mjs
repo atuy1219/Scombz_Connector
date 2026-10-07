@@ -5,7 +5,7 @@ import { build } from 'esbuild';
 import { FILE_WIDGET_HTML } from '../src/file-widget.mjs';
 
 // Exercise the browser pipeline, mocking only host APIs and the MCP bridge.
-// This is not evidence that ChatGPT attaches uploaded PDFs to model context.
+// Actual ChatGPT PDF ingestion remains an explicit manual acceptance test.
 const compiled = await build({
   entryPoints: ['src/file-widget-client.mjs'],
   bundle: true,
@@ -51,25 +51,33 @@ const response = () => ({
   },
 });
 
+async function settle(predicate, attempts = 100) {
+  for (let i = 0; i < attempts; i++) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
+}
+
 async function screen({
   body = '%PDF-1.7 fixture',
   api = true,
   upload,
   globals = {},
   fetcher,
+  toolResult = response(),
 } = {}) {
   const elements = new Map(
     [...FILE_WIDGET_HTML.matchAll(/id="([^"]+)"/g)].map(([, id]) => [
       id,
       {
-        hidden: /^(verify|refresh|download|file-id)$/.test(id),
+        hidden: /^(upload|verify|refresh|download|file-id)$/.test(id),
         disabled: id === 'upload',
         textContent: '',
         checked: false,
       },
     ]),
   );
-  const calls = { uploads: [], fetches: [], states: [] };
+  const calls = { uploads: [], fetches: [], states: [], downloadUrls: [] };
   const listeners = new Map();
   const openai = {
     ...globals,
@@ -82,6 +90,10 @@ async function screen({
           async uploadFile(file, options) {
             calls.uploads.push({ file, options });
             return upload ? upload(file, options) : { fileId: 'file-host-123' };
+          },
+          async getFileDownloadUrl({ fileId }) {
+            calls.downloadUrls.push(fileId);
+            return { downloadUrl: `https://files.oaiusercontent.test/${fileId}` };
           },
         }
       : {}),
@@ -111,38 +123,42 @@ async function screen({
   vm.runInContext(script, context);
   await Promise.resolve();
   await Promise.resolve();
-  context.bridge.ontoolresult(response());
+  context.bridge.ontoolresult(toolResult);
+  await settle(() => calls.uploads.length > 0 || !api || elements.get('upload').hidden === false);
+  await settle(() => context.messages.length > 0 || calls.uploads.length === 0 || elements.get('verify').hidden === false);
   return { elements, calls, context, listeners, openai };
 }
 
-test('whole 7.19 and 50 MiB PDFs upload outside MCP, stay unverified and require an explicit follow-up', async () => {
+test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context', async () => {
   for (const bytes of [7536336, 50 * 1048576]) {
     const body = new Uint8Array(bytes);
     body.set(new TextEncoder().encode('%PDF-1.7'));
     const s = await screen({ body });
     assert.deepEqual(Array.from(s.context.bridge.capabilities.availableDisplayModes), ['inline']);
-    s.elements.get('library').checked = true;
-    await s.elements.get('upload').onclick();
     assert.equal(s.calls.uploads.length, 1);
     assert.equal(s.calls.uploads[0].file.size, bytes);
     assert.equal(s.calls.uploads[0].file.name, '講義.pdf');
     assert.equal(s.calls.uploads[0].file.type, 'application/pdf');
-    assert.equal(s.calls.uploads[0].options.library, true);
+    assert.equal(s.calls.uploads[0].options.library, false);
     assert.equal(s.calls.fetches[0].options.credentials, 'omit');
     assert.equal(s.calls.fetches[0].options.redirect, 'error');
-    assert.equal(s.calls.states[0].modelContent.model_readability, 'unverified');
-    assert.ok(!JSON.stringify(s.calls.states).includes('private-link'));
-    assert.equal(s.context.messages.length, 0);
-    await s.elements.get('upload').onclick();
-    assert.equal(s.calls.uploads.length, 1, 'repeated click cannot create another upload');
-    await s.elements.get('verify').onclick();
+    assert.equal(s.calls.downloadUrls[0], 'file-host-123');
+    assert.equal(s.context.contexts.length, 1);
+    const link = s.context.contexts[0].content.find((x) => x.type === 'resource_link');
+    assert.equal(link.name, '講義.pdf');
+    assert.equal(link.mimeType, 'application/pdf');
+    assert.equal(link.uri, 'https://files.oaiusercontent.test/file-host-123');
     assert.equal(s.context.messages.length, 1);
     assert.ok(s.context.messages[0].content[0].text.includes('2ページ目'));
-    assert.ok(s.context.messages[0].content[0].text.includes('アクセスできなければ'));
+    assert.equal(s.calls.states.at(-1).modelContent.model_readability, 'verification_requested');
+    assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, true);
+    assert.ok(!JSON.stringify(s.calls.states).includes('private-link'));
+    assert.ok(!JSON.stringify(s.calls.states).includes('files.oaiusercontent.test'));
+    assert.equal(s.elements.get('upload').hidden, true);
   }
 });
 
-test('empty, HTML, over-limit and failed downloads never reach uploadFile', async () => {
+test('empty, HTML, over-limit and failed downloads never reach uploadFile and expose retry', async () => {
   for (const fetcher of [
     () => new Response(''),
     () => new Response('<html>login</html>'),
@@ -150,31 +166,29 @@ test('empty, HTML, over-limit and failed downloads never reach uploadFile', asyn
     () => new Response('failed', { status: 422 }),
   ]) {
     const s = await screen({ fetcher });
-    await s.elements.get('upload').onclick();
     assert.equal(s.calls.uploads.length, 0);
     assert.equal(s.elements.get('verify').hidden, true);
+    assert.equal(s.elements.get('upload').hidden, false);
     assert.equal(s.elements.get('upload').disabled, false);
   }
 });
 
-test('expired link refreshes through its scoped tool and reuses material identity', async () => {
-  const s = await screen();
+test('expired link refreshes through its scoped tool and auto-retries', async () => {
   const expired = response();
   expired._meta.file_transfer.expires_at = '2000-01-01T00:00:00Z';
-  s.context.bridge.ontoolresult(expired);
-  await s.elements.get('upload').onclick();
+  const s = await screen({ toolResult: expired });
   assert.equal(s.calls.fetches.length, 0);
   assert.equal(s.calls.uploads.length, 0);
   assert.equal(s.elements.get('refresh').hidden, false);
   s.context.refreshResult = response();
   await s.elements.get('refresh').onclick();
+  await settle(() => s.calls.uploads.length === 1);
   assert.equal(s.context.toolCalls[0].name, 'open_file_in_chat');
   assert.equal(s.context.toolCalls[0].arguments.file_id, 'material:m:r');
-  await s.elements.get('upload').onclick();
   assert.equal(s.calls.uploads.length, 1);
 });
 
-test('upload rejection retries cached bytes; missing API and restored uploads do not fetch', async () => {
+test('upload rejection exposes manual retry; restored uploads do not refetch original', async () => {
   let rejected = true;
   const s = await screen({
     upload: async () => {
@@ -185,21 +199,22 @@ test('upload rejection retries cached bytes; missing API and restored uploads do
       return { fileId: 'file-host-123' };
     },
   });
-  await s.elements.get('upload').onclick();
   assert.equal(s.calls.states.length, 0);
   assert.equal(s.elements.get('verify').hidden, true);
+  assert.equal(s.elements.get('upload').hidden, false);
   assert.ok(s.elements.get('status').textContent.includes('失敗箇所: ChatGPTアップロード'));
   assert.ok(s.elements.get('status').textContent.includes('例外: Error: host rejected'));
-  assert.ok(s.elements.get('status').textContent.includes('原本取得は成功しています'));
   await s.elements.get('upload').onclick();
+  await settle(() => s.context.messages.length === 1);
   assert.equal(s.calls.fetches.length, 1);
   assert.equal(s.calls.uploads.length, 2);
-  const restored = await screen({ globals: { widgetState: s.calls.states[0] } });
-  await restored.elements.get('upload').onclick();
+
+  const restoredState = s.calls.states.at(-1);
+  const restored = await screen({ globals: { widgetState: restoredState } });
   assert.equal(restored.calls.fetches.length, 0);
-  assert.equal(restored.elements.get('verify').hidden, false);
+  assert.equal(restored.calls.uploads.length, 0);
+
   const missing = await screen({ api: false });
-  await missing.elements.get('upload').onclick();
   assert.equal(missing.calls.fetches.length, 0);
   assert.equal(missing.elements.get('download').hidden, false);
   assert.ok(missing.elements.get('status').textContent.includes('会話に添付'));
