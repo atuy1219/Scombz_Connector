@@ -148,8 +148,12 @@ async function linkUploadedFile() {
     mimeType: uploaded.mime_type,
   };
   const verificationText =
-    `教材「${uploaded.filename}」のPDF原本を取得しました。本文を実際に読み、この会話の依頼に使ってください。` +
-    'まず2ページ目の内容をページ番号付きで確認してください。';
+    `教材「${uploaded.filename}」のPDF原本をChatGPTへアップロードしました。` +
+    `アップロード済みfileIdは ${uploaded.file_id} です。` +
+    'このfileIdのファイルが会話添付として直接読めない場合は、ChatGPTのFiles機能で' +
+    'このアップロード済みファイルをファイルライブラリへ保存してから本文を読んでください。' +
+    '保存時は可能ならsource_file_ref.file_idにこのfileIdを使い、/ScombZ/配下へ保存してください。' +
+    'resource_linkやファイル名だけで読めたとは扱わず、まず2ページ目の内容をページ番号付きで確認してください。';
 
   try {
     // Prefer attaching the uploaded PDF directly to the follow-up turn. In ChatGPT,
@@ -162,6 +166,7 @@ async function linkUploadedFile() {
     uploaded.model_context_linked = true;
     uploaded.followup_sent = true;
     uploaded.delivery_mode = 'ui_message_resource_link';
+    uploaded.library_handoff = 'model_file_id';
   } catch {
     try {
       // Fallback for hosts that accept resource links in model context but not ui/message.
@@ -183,6 +188,7 @@ async function linkUploadedFile() {
       uploaded.model_context_linked = true;
       uploaded.followup_sent = true;
       uploaded.delivery_mode = 'update_model_context_fallback';
+      uploaded.library_handoff = 'model_file_id';
     } catch {
       uploaded.model_context_linked = false;
       uploaded.followup_sent = false;
