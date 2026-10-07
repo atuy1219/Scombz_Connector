@@ -124,10 +124,11 @@ async function linkUploadedFile() {
   if (!canResolveUploadedFile()) {
     el('verify').hidden = false;
     status(
-      'アップロード完了。ただし、このホストではPDFをモデルコンテキストへ渡すAPIを利用できません。',
+      'アップロード完了。ただし、このホストではPDFをモデルへ渡すための一時URLを取得できません。',
     );
     return;
   }
+
   let downloadUrl;
   try {
     const resolved = await window.openai.getFileDownloadUrl({ fileId: uploaded.file_id });
@@ -140,52 +141,66 @@ async function linkUploadedFile() {
     return;
   }
 
-  const context = {
-    content: [
-      {
-        type: 'text',
-        text:
-          `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
-      },
-      {
-        type: 'resource_link',
-        uri: downloadUrl,
-        name: uploaded.filename,
-        mimeType: uploaded.mime_type,
-      },
-    ],
+  const resourceLink = {
+    type: 'resource_link',
+    uri: downloadUrl,
+    name: uploaded.filename,
+    mimeType: uploaded.mime_type,
   };
+  const verificationText =
+    `教材「${uploaded.filename}」のPDF原本を取得しました。本文を実際に読み、この会話の依頼に使ってください。` +
+    'まず2ページ目の内容をページ番号付きで確認してください。';
+
   try {
-    await app.updateModelContext(context);
-    uploaded.model_context_linked = true;
-    try {
-      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-    } catch {}
+    // Prefer attaching the uploaded PDF directly to the follow-up turn. In ChatGPT,
+    // ui/message resource links are model-visible file attachments on supported hosts.
     const sent = await app.sendMessage({
       role: 'user',
-      content: [
-        {
-          type: 'text',
-          text:
-            `教材「${uploaded.filename}」のPDF原本を取得しました。本文を実際に読み、この会話の依頼に使ってください。まず2ページ目の内容をページ番号付きで確認してください。`,
-        },
-      ],
+      content: [{ type: 'text', text: verificationText }, resourceLink],
     });
-    if (sent?.isError) throw new Error('message_rejected');
+    if (sent?.isError) throw new Error('message_resource_link_rejected');
+    uploaded.model_context_linked = true;
     uploaded.followup_sent = true;
-    uploaded.model_readability = 'verification_requested';
-    try {
-      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-    } catch {}
-    el('verify').hidden = true;
-    status('アップロード完了。PDFをモデルコンテキストへ渡し、読み取り確認を開始しました。');
+    uploaded.delivery_mode = 'ui_message_resource_link';
   } catch {
-    uploaded.model_context_linked = false;
-    el('verify').hidden = false;
-    status(
-      'アップロード完了。ただし、PDFをモデルコンテキストへ渡せませんでした。確認ボタンで再試行できます。',
-    );
+    try {
+      // Fallback for hosts that accept resource links in model context but not ui/message.
+      await app.updateModelContext({
+        content: [
+          {
+            type: 'text',
+            text:
+              `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
+          },
+          resourceLink,
+        ],
+      });
+      const sent = await app.sendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: verificationText }],
+      });
+      if (sent?.isError) throw new Error('message_rejected');
+      uploaded.model_context_linked = true;
+      uploaded.followup_sent = true;
+      uploaded.delivery_mode = 'update_model_context_fallback';
+    } catch {
+      uploaded.model_context_linked = false;
+      uploaded.followup_sent = false;
+      uploaded.delivery_mode = 'failed';
+      el('verify').hidden = false;
+      status(
+        'アップロード完了。ただし、PDFをモデルへ渡せませんでした。確認ボタンで再試行できます。',
+      );
+      return;
+    }
   }
+
+  uploaded.model_readability = 'verification_requested';
+  try {
+    window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+  } catch {}
+  el('verify').hidden = true;
+  status('アップロード完了。PDFを会話へ添付し、読み取り確認を開始しました。');
 }
 
 async function startUpload() {
