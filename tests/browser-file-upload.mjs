@@ -3,9 +3,9 @@ import assert from 'node:assert/strict';
 import { chromium } from 'playwright';
 import { FILE_WIDGET_HTML } from '../src/file-widget.mjs';
 
-// Real Chromium + real MCP Apps SDK; ChatGPT file APIs are fixtures.
-// Actual ChatGPT PDF ingestion remains an explicit manual acceptance test.
-test('inline widget auto-uploads a PDF, links it into model context, and triggers verification', async () => {
+// Real Chromium + real MCP Apps SDK; ChatGPT file/follow-up APIs are fixtures.
+// Actual ChatGPT Files/Library ingestion remains an explicit acceptance test.
+test('inline widget auto-uploads a PDF and hands its file ID to a ChatGPT follow-up', async () => {
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage();
@@ -26,11 +26,12 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
         },
       },
     };
+
     await page.addInitScript(() => {
       if (location.pathname !== '/widget') return;
       window.uploads = [];
       window.savedStates = [];
-      window.downloadUrlCalls = [];
+      window.followups = [];
       window.openai = {
         async uploadFile(file, options) {
           window.uploads.push({
@@ -40,33 +41,33 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
             signature: await file.slice(0, 5).text(),
             library: options.library,
           });
-          return { fileId: 'file-browser-fixture' };
+          return { fileId: 'sediment://file-browser-fixture' };
         },
-        async getFileDownloadUrl({ fileId }) {
-          window.downloadUrlCalls.push(fileId);
-          return { downloadUrl: 'https://files.oaiusercontent.test/file-browser-fixture' };
+        async sendFollowUpMessage(value) {
+          window.followups.push(value);
         },
         setWidgetState(state) {
           window.savedStates.push(state);
         },
       };
     });
+
     const host = `<!doctype html><meta charset="utf-8"><iframe src="/widget" style="width:460px;height:440px;border:0"></iframe>
       <script>
-      window.messages=[]; window.contexts=[]; window.initializations=[];
+      window.initializations=[];
       addEventListener('message', e => {
         const m=e.data; if(m?.jsonrpc!=='2.0')return;
         const reply=result=>e.source.postMessage({jsonrpc:'2.0',id:m.id,result},e.origin);
         if(m.method==='ui/initialize') {
           window.initializations.push(m.params);
           reply({protocolVersion:m.params.protocolVersion,hostInfo:{name:'browser-fixture',version:'1'},
-            hostCapabilities:{serverTools:{},message:{text:{},resourceLink:{}},updateModelContext:{text:{},resourceLink:{}}},
+            hostCapabilities:{serverTools:{}},
             hostContext:{displayMode:'inline',availableDisplayModes:['inline'],theme:'light'}});
         } else if(m.method==='ui/notifications/initialized') {
           e.source.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:${JSON.stringify(result)}},e.origin);
-        } else if(m.method==='ui/update-model-context') { window.contexts.push(m.params);reply({}); }
-        else if(m.method==='ui/message') { window.messages.push(m.params);reply({}); }
+        }
       });</script>`;
+
     await page.route('https://host.test/**', (route) =>
       route.fulfill({
         contentType: 'text/html; charset=utf-8',
@@ -80,13 +81,18 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
         headers: { 'Access-Control-Allow-Origin': '*' },
       }),
     );
+
     await page.goto('https://host.test/');
     const frame = page.frameLocator('iframe');
     await page.waitForFunction(() => {
       const iframe = document.querySelector('iframe');
       return !!iframe?.contentWindow?.uploads?.length;
     });
-    await page.waitForFunction(() => window.messages.length === 1);
+    await page.waitForFunction(() => {
+      const iframe = document.querySelector('iframe');
+      return !!iframe?.contentWindow?.followups?.length;
+    });
+
     const ui = page.frames().find((f) => f.url().endsWith('/widget'));
     const uploads = await ui.evaluate(() => window.uploads);
     assert.deepEqual(uploads, [
@@ -98,30 +104,31 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
         library: true,
       },
     ]);
-    assert.deepEqual(await ui.evaluate(() => window.downloadUrlCalls), ['file-browser-fixture']);
+
+    const followup = await ui.evaluate(() => window.followups[0]);
+    assert.ok(followup.prompt.includes('file-browser-fixture'));
+    assert.ok(followup.prompt.includes('source_file_ref.file_id'));
+    assert.ok(followup.prompt.includes('/ScombZ/講義.pdf'));
+    assert.ok(followup.prompt.includes('2ページ目'));
+
     assert.equal(await frame.locator('#filename').textContent(), '講義.pdf');
-    assert.ok((await frame.locator('#status').textContent()).includes('読み取り確認を開始'));
+    assert.ok((await frame.locator('#status').textContent()).includes('ライブラリ保存'));
+
     assert.deepEqual(
       await page.evaluate(() => window.initializations[0].appCapabilities.availableDisplayModes),
       ['inline'],
     );
-    assert.equal(await page.evaluate(() => window.contexts.length), 0);
-    const message = await page.evaluate(() => window.messages[0]);
-    const link = message.content.find((x) => x.type === 'resource_link');
-    assert.equal(link.uri, 'https://files.oaiusercontent.test/file-browser-fixture');
-    assert.equal(link.name, '講義.pdf');
-    assert.equal(link.mimeType, 'application/pdf');
-    assert.ok(message.content[0].text.includes('2ページ目'));
-    assert.ok(message.content[0].text.includes('file-browser-fixture'));
-    assert.ok(message.content[0].text.includes('/ScombZ/'));
+
     const state = await ui.evaluate(() => window.savedStates.at(-1));
+    assert.equal(state.modelContent.file_id, 'sediment://file-browser-fixture');
+    assert.equal(state.modelContent.files_source_file_id, 'file-browser-fixture');
     assert.equal(state.modelContent.library_saved, true);
+    assert.equal(state.modelContent.handoff_ready, true);
+    assert.equal(state.modelContent.followup_sent, true);
     assert.equal(state.modelContent.model_readability, 'verification_requested');
-    assert.equal(state.modelContent.model_context_linked, true);
-    assert.equal(state.modelContent.delivery_mode, 'ui_message_resource_link');
+    assert.equal(state.modelContent.delivery_mode, 'chatgpt_follow_up_file_id');
     assert.equal(state.modelContent.library_handoff, 'model_file_id');
     assert.ok(!JSON.stringify(state).includes('ticket='));
-    assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
     assert.equal(await frame.locator('#upload').isHidden(), true);
   } finally {
     await browser.close();
