@@ -16,6 +16,8 @@ const status = (text) => {
   el('status').textContent = text;
 };
 const supported = () => typeof window.openai?.uploadFile === 'function';
+const canResolveUploadedFile = () =>
+  typeof window.openai?.getFileDownloadUrl === 'function';
 
 function receive(value) {
   if (!value?.structuredContent?.file || !value?._meta?.file_transfer) return;
@@ -63,15 +65,19 @@ function receive(value) {
   el('download').hidden = false;
   el('refresh').hidden = true;
   el('upload').disabled = busy || !!uploaded || !supported();
+  el('upload').hidden = true;
   el('verify').hidden = !uploaded;
-  el('library').disabled = !!uploaded || busy || !supported();
-  if (!uploaded)
+  if (!uploaded) {
     status(
       supported()
-        ? '教材をChatGPTへアップロードできます。'
+        ? '教材を自動取得してChatGPTへアップロードします…'
         : 'この画面ではアップロード機能を利用できません。原本をダウンロードし、会話に添付してください。',
     );
-  else status('アップロード完了。PDF本文を読めるかは未確認です。');
+    void maybeAutoUpload();
+  } else {
+    status('アップロード完了。PDF本文を読めるかは未確認です。');
+    if (connected) void linkUploadedFile();
+  }
 }
 
 async function downloadFile() {
@@ -113,39 +119,112 @@ async function downloadFile() {
   return cachedFile;
 }
 
-el('upload').onclick = async () => {
+async function linkUploadedFile() {
+  if (!uploaded || !connected || uploaded.model_context_linked) return;
+  if (!canResolveUploadedFile()) {
+    el('verify').hidden = false;
+    status(
+      'アップロード完了。ただし、このホストではPDFをモデルコンテキストへ渡すAPIを利用できません。',
+    );
+    return;
+  }
+  let downloadUrl;
+  try {
+    const resolved = await window.openai.getFileDownloadUrl({ fileId: uploaded.file_id });
+    downloadUrl = resolved?.downloadUrl;
+    const parsed = new URL(downloadUrl);
+    if (parsed.protocol !== 'https:') throw new Error('invalid_download_url');
+  } catch {
+    el('verify').hidden = false;
+    status('アップロード完了。ただし、PDFのモデル向け参照URLを取得できませんでした。');
+    return;
+  }
+
+  const context = {
+    content: [
+      {
+        type: 'text',
+        text:
+          `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
+      },
+      {
+        type: 'resource_link',
+        uri: downloadUrl,
+        name: uploaded.filename,
+        mimeType: uploaded.mime_type,
+      },
+    ],
+  };
+  try {
+    await app.updateModelContext(context);
+    uploaded.model_context_linked = true;
+    try {
+      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+    } catch {}
+    const sent = await app.sendMessage({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text:
+            `教材「${uploaded.filename}」のPDF原本を取得しました。本文を実際に読み、この会話の依頼に使ってください。まず2ページ目の内容をページ番号付きで確認してください。`,
+        },
+      ],
+    });
+    if (sent?.isError) throw new Error('message_rejected');
+    uploaded.followup_sent = true;
+    uploaded.model_readability = 'verification_requested';
+    try {
+      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+    } catch {}
+    el('verify').hidden = true;
+    status('アップロード完了。PDFをモデルコンテキストへ渡し、読み取り確認を開始しました。');
+  } catch {
+    uploaded.model_context_linked = false;
+    el('verify').hidden = false;
+    status(
+      'アップロード完了。ただし、PDFをモデルコンテキストへ渡せませんでした。確認ボタンで再試行できます。',
+    );
+  }
+}
+
+async function startUpload() {
   if (busy || uploaded || !result || !supported()) return;
   busy = true;
   el('upload').disabled = true;
-  el('library').disabled = true;
+  el('upload').hidden = true;
   let phase = 'download';
   try {
     const file = await downloadFile();
     phase = 'upload';
     status(
-      `原本取得成功: ${(file.size / 1048576).toFixed(2)} MiB\nChatGPTへアップロード中…`,
+      `原本取得成功: ${(file.size / 1048576).toFixed(2)} MiB\nChatGPTへ自動アップロード中…`,
     );
-    const value = await window.openai.uploadFile(file, { library: el('library').checked });
+    const value = await window.openai.uploadFile(file, { library: false });
     if (typeof value?.fileId !== 'string' || !value.fileId) throw new Error('upload_failed');
     uploaded = {
       file_id: value.fileId,
       filename: file.name,
+      mime_type: file.type,
       bytes: file.size,
       source_file_id: result.file.file_id,
       course_id: result.file.course_id,
       upload_status: 'completed',
       model_readability: 'unverified',
+      model_context_linked: false,
+      followup_sent: false,
     };
-    status('アップロード完了。PDF本文を読めるかは未確認です。');
-    el('verify').hidden = false;
     el('file-id').textContent = `ファイルID: ${value.fileId}`;
     el('file-id').hidden = false;
-    // A file ID in text is not an attachment. Do not mislabel a PDF as an imageId.
     try {
       window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
     } catch {}
-    if (connected) await app.updateModelContext({ structuredContent: uploaded }).catch(() => {});
     cachedFile = null;
+    if (connected) await linkUploadedFile();
+    else {
+      status('アップロード完了。モデルコンテキストへの受け渡しを待っています…');
+      el('verify').hidden = false;
+    }
   } catch (error) {
     const messages = {
       expired: '取得リンクの期限が切れました。リンクを更新してください。',
@@ -162,7 +241,6 @@ el('upload').onclick = async () => {
       error instanceof Error
         ? `${error.name}: ${error.message || '(messageなし)'}`
         : String(error);
-    // Signed download URLs contain short-lived tickets. Never expose them in diagnostics.
     const detail = rawDetail
       .replace(/https?:\/\/\S+/g, '[URL]')
       .replace(/ticket=[^\\s&]+/gi, 'ticket=[REDACTED]')
@@ -176,13 +254,20 @@ el('upload').onclick = async () => {
           ? '原本取得は成功しています。ChatGPT側のアップロード処理で失敗しました。'
           : '再試行するか、原本をダウンロードして会話に添付してください。'),
     );
+    el('upload').hidden = false;
     el('refresh').hidden = error?.message !== 'expired';
   } finally {
     busy = false;
     el('upload').disabled = !!uploaded || !supported();
-    el('library').disabled = !!uploaded || !supported();
   }
-};
+}
+
+async function maybeAutoUpload() {
+  if (!connected || busy || uploaded || !result || !supported()) return;
+  await startUpload();
+}
+
+el('upload').onclick = startUpload;
 el('refresh').onclick = async () => {
   if (busy || !connected || !result) return;
   el('refresh').disabled = true;
@@ -202,22 +287,9 @@ el('refresh').onclick = async () => {
 el('verify').onclick = async () => {
   if (!uploaded) return;
   el('verify').disabled = true;
-  const prompt =
-    `教材「${uploaded.filename}」をアップロードしました（fileId: ${uploaded.file_id}）。` +
-    'PDF原本にアクセスできる場合は、2ページ目の内容をページ番号付きで説明してください。' +
-    'ファイルIDや名前だけでは本文を確認したことになりません。アクセスできなければ、その旨を明示してください。';
   try {
-    if (connected) {
-      const sent = await app.sendMessage({
-        role: 'user',
-        content: [{ type: 'text', text: prompt }],
-      });
-      if (sent?.isError) throw new Error('rejected');
-    } else if (window.openai?.sendFollowUpMessage)
-      await window.openai.sendFollowUpMessage({ prompt });
-    else throw new Error('unsupported');
-  } catch {
-    status('確認メッセージを送れませんでした。会話でPDFの読み取りを依頼してください。');
+    uploaded.model_context_linked = false;
+    await linkUploadedFile();
   } finally {
     el('verify').disabled = false;
   }
@@ -239,6 +311,8 @@ app
   .connect()
   .then(() => {
     connected = true;
+    if (uploaded) void linkUploadedFile();
+    else void maybeAutoUpload();
   })
   .catch(() => {
     if (!result) status('教材情報を受け取れませんでした。教材をもう一度開いてください。');

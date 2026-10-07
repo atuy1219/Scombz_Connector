@@ -626,7 +626,7 @@ test('chat widget keeps scoped links private, serves its UI and authenticates be
   const resource = ui.result.contents[0];
   assert.equal(resource.mimeType, 'text/html;profile=mcp-app');
   assert.deepEqual(resource._meta.ui.csp.connectDomains, [origin]);
-  assert.ok(resource.text.includes('ChatGPTへアップロード'));
+  assert.ok(resource.text.includes('教材は自動取得・アップロードされ'));
   assert.ok(resource.text.includes('model_readability'));
   const beforeRead = upstream;
   const unauthenticated = await post(
