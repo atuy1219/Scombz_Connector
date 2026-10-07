@@ -40,14 +40,14 @@ export async function mcpResponse(request, env, options = {}) {
     try {
       const value = await handler(args);
       const extraContent = Array.isArray(value?._content) ? value._content : [];
-      const { _content, _meta, ...publicValue } = value ?? {};
+      const { _content, _meta, _summary, ...publicValue } = value ?? {};
       const result = {
         ...publicValue,
         fetched_at: new Date().toISOString(),
         timezone: 'Asia/Tokyo',
       };
       return {
-        content: [{ type: 'text', text: JSON.stringify(result) }, ...extraContent],
+        content: [{ type: 'text', text: _summary ?? JSON.stringify(result) }, ...extraContent],
         structuredContent: result,
         ...(_meta ? { _meta } : {}),
       };
@@ -116,17 +116,17 @@ export async function mcpResponse(request, env, options = {}) {
     {
       title: '教材をChatGPTで開く',
       description:
-        '通常チャット向けの教材アップロードWidgetを表示します。WidgetはConnectorから教材原本を自動取得してChatGPTへアップロードし、ChatGPT側の一時ファイルURLをresource_linkとして確認用メッセージへ直接添付し、本文読み取り確認まで自動で開始します。対応しないホストではモデルコンテキスト経由へフォールバックします。さらに確認メッセージへuploadFileのfileIdを含め、ホストのFiles/Library機能が利用できる場合はモデル側でライブラリ保存して読むフォールバックも可能にします。通常時はアップロードボタン操作不要です。原本はMCP応答に載らず、SESSIONのChatGPTへの受け渡しも不要です。fileIdの取得だけで読めたと扱わず、実際のページ内容を確認してください。',
+        '通常チャット向けの教材アップロードWidgetを表示します。WidgetはConnectorから教材原本を自動取得してChatGPTへアップロードし、ChatGPT側の一時ファイルURLをresource_linkとして確認用メッセージへ直接添付し、本文読み取り確認まで自動で開始します。対応しないホストではモデルコンテキスト経由へフォールバックし、ファイル参照の受け渡しに失敗した場合だけfileIdによるFiles/Library読取を案内します。通常時はアップロードボタン操作不要です。原本はMCP応答に載らず、SESSIONのChatGPTへの受け渡しも不要です。fileIdの取得だけで読めたと扱わず、実際のページ内容を確認してください。',
       inputSchema: { course_id: id, file_id: fileId },
       outputSchema: {
         file: z.object({
           file_id: z.string(),
           course_id: z.string(),
-          filename: z.string(),
+          filename: z.string().nullable(),
           kind: z.string(),
           assignment_id: z.string().nullable(),
         }),
-        mime_type: z.string(),
+        mime_type: z.string().nullable(),
         size_bytes: z.null(),
         delivery: z.literal('chatgpt_widget_upload'),
         upload_status: z.literal('not_started'),
@@ -146,7 +146,8 @@ export async function mcpResponse(request, env, options = {}) {
       },
     },
     wrap(async (args) => {
-      const plan = await client.materialDownloadPlan(args.course_id, args.file_id);
+      // Resolve metadata once, when /files is actually requested by the Widget.
+      const [kind, parentId] = args.file_id.split(':');
       const expires = Math.floor(Date.now() / 1000) + 600;
       const ticket = await sign(env, {
         kind: 'file',
@@ -159,15 +160,20 @@ export async function mcpResponse(request, env, options = {}) {
       url.searchParams.set('file_id', args.file_id);
       url.searchParams.set('ticket', ticket);
       return {
-        file: plan.file,
-        mime_type: plan.file.filename.toLowerCase().endsWith('.pdf')
-          ? 'application/pdf'
-          : 'application/octet-stream',
+        file: {
+          file_id: args.file_id,
+          course_id: args.course_id,
+          filename: null,
+          kind,
+          assignment_id: kind === 'assignment' ? parentId : null,
+        },
+        mime_type: null,
         size_bytes: null,
         delivery: 'chatgpt_widget_upload',
         upload_status: 'not_started',
         model_readability: 'unverified',
         retention: 'not_stored_by_connector',
+        _summary: '教材の自動アップロードを準備しました。本文の読み取りは未確認です。',
         _meta: {
           file_transfer: {
             download_url: url.href,

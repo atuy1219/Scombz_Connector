@@ -16,8 +16,7 @@ const status = (text) => {
   el('status').textContent = text;
 };
 const supported = () => typeof window.openai?.uploadFile === 'function';
-const canResolveUploadedFile = () =>
-  typeof window.openai?.getFileDownloadUrl === 'function';
+const canResolveUploadedFile = () => typeof window.openai?.getFileDownloadUrl === 'function';
 const canCloseWidget = () => typeof window.openai?.requestClose === 'function';
 async function closeCompletedWidget() {
   if (!uploaded || uploaded.upload_status !== 'completed' || !canCloseWidget()) return;
@@ -52,7 +51,10 @@ function receive(value) {
     status('教材の取得リンクを確認できません。');
     return;
   }
-  if (next.file.file_id !== result?.file?.file_id) {
+  if (
+    next.file.file_id !== result?.file?.file_id ||
+    next.file.course_id !== result?.file?.course_id
+  ) {
     uploaded = null;
     cachedFile = null;
   }
@@ -67,7 +69,7 @@ function receive(value) {
     previous.course_id === result.file.course_id
   )
     uploaded = previous;
-  el('filename').textContent = result.file.filename;
+  el('filename').textContent = uploaded?.filename ?? result.file.filename ?? '教材原本';
   el('download').href = url.href;
   el('download').hidden = false;
   el('refresh').hidden = true;
@@ -102,6 +104,17 @@ async function downloadFile() {
   });
   if (response.status === 401) throw new Error('expired');
   if (!response.ok) throw new Error(response.status === 413 ? 'too_large' : 'download_failed');
+  // The server resolves the real name/type only when it streams the original.
+  const disposition = response.headers.get('content-disposition');
+  const encodedName = disposition?.match(/filename\*=UTF-8''([^;]+)/i)?.[1];
+  const filename = encodedName ? decodeURIComponent(encodedName) : result.file.filename;
+  if (!filename) throw new Error('invalid_metadata');
+  const mime = filename.toLowerCase().endsWith('.pdf')
+    ? 'application/pdf'
+    : (response.headers.get('content-type')?.split(';')[0].trim() ??
+      result.mime_type ??
+      'application/octet-stream');
+  el('filename').textContent = filename;
   const maximum = Math.min(transfer.max_bytes, 100 * 1024 * 1024);
   const declared = Number(response.headers.get('content-length'));
   if (declared > maximum) throw new Error('too_large');
@@ -123,11 +136,34 @@ async function downloadFile() {
     throw error;
   }
   if (!size) throw new Error('empty');
-  const blob = new Blob(chunks, { type: result.mime_type });
-  if (result.mime_type === 'application/pdf' && (await blob.slice(0, 5).text()) !== '%PDF-')
+  const blob = new Blob(chunks, { type: mime });
+  if (mime === 'application/pdf' && (await blob.slice(0, 5).text()) !== '%PDF-')
     throw new Error('invalid_pdf');
-  cachedFile = new File([blob], result.file.filename, { type: result.mime_type });
+  cachedFile = new File([blob], filename, { type: mime });
   return cachedFile;
+}
+
+async function sendFileIdFallback() {
+  if (!uploaded || !connected || uploaded.file_id_fallback_sent) return;
+  try {
+    const sent = await app.sendMessage({
+      role: 'user',
+      content: [
+        {
+          type: 'text',
+          text:
+            `ScombZ教材「${uploaded.filename}」はアップロード済みですが、ファイル参照を渡せませんでした。` +
+            `fileId: ${uploaded.file_id}。Files/Library機能が利用できる場合は、このfileIdをsource_file_ref.file_idとして保存・読取を試し、本文を確認して元の依頼を続行してください。`,
+        },
+      ],
+    });
+    if (sent?.isError) return;
+    uploaded.file_id_fallback_sent = true;
+    uploaded.library_handoff = 'model_file_id';
+    try {
+      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+    } catch {}
+  } catch {}
 }
 
 async function linkUploadedFile() {
@@ -137,6 +173,7 @@ async function linkUploadedFile() {
     status(
       'アップロード完了。ただし、このホストではPDFをモデルへ渡すための一時URLを取得できません。',
     );
+    await sendFileIdFallback();
     return;
   }
 
@@ -149,6 +186,7 @@ async function linkUploadedFile() {
   } catch {
     el('verify').hidden = false;
     status('アップロード完了。ただし、PDFのモデル向け参照URLを取得できませんでした。');
+    await sendFileIdFallback();
     return;
   }
 
@@ -159,12 +197,8 @@ async function linkUploadedFile() {
     mimeType: uploaded.mime_type,
   };
   const verificationText =
-    `教材「${uploaded.filename}」のPDF原本をChatGPTへアップロードしました。` +
-    `アップロード済みfileIdは ${uploaded.file_id} です。` +
-    'このfileIdのファイルが会話添付として直接読めない場合は、ChatGPTのFiles機能で' +
-    'このアップロード済みファイルをファイルライブラリへ保存してから本文を読んでください。' +
-    '保存時は可能ならsource_file_ref.file_idにこのfileIdを使い、/ScombZ/配下へ保存してください。' +
-    'resource_linkやファイル名だけで読めたとは扱わず、まず2ページ目の内容をページ番号付きで確認してください。';
+    `ScombZ教材「${uploaded.filename}」をアップロードしました。` +
+    '本文を実際に確認してから取得成功と判断し、元の依頼を続行してください。';
 
   try {
     // Prefer attaching the uploaded PDF directly to the follow-up turn. In ChatGPT,
@@ -177,7 +211,7 @@ async function linkUploadedFile() {
     uploaded.model_context_linked = true;
     uploaded.followup_sent = true;
     uploaded.delivery_mode = 'ui_message_resource_link';
-    uploaded.library_handoff = 'model_file_id';
+    uploaded.library_handoff = 'resource_link';
   } catch {
     try {
       // Fallback for hosts that accept resource links in model context but not ui/message.
@@ -185,8 +219,7 @@ async function linkUploadedFile() {
         content: [
           {
             type: 'text',
-            text:
-              `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
+            text: `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
           },
           resourceLink,
         ],
@@ -199,7 +232,7 @@ async function linkUploadedFile() {
       uploaded.model_context_linked = true;
       uploaded.followup_sent = true;
       uploaded.delivery_mode = 'update_model_context_fallback';
-      uploaded.library_handoff = 'model_file_id';
+      uploaded.library_handoff = 'resource_link';
     } catch {
       uploaded.model_context_linked = false;
       uploaded.followup_sent = false;
@@ -208,6 +241,7 @@ async function linkUploadedFile() {
       status(
         'アップロード完了。ただし、PDFをモデルへ渡せませんでした。確認ボタンで再試行できます。',
       );
+      await sendFileIdFallback();
       return;
     }
   }
@@ -272,9 +306,7 @@ async function startUpload() {
       upload: 'ChatGPTアップロード',
     };
     const rawDetail =
-      error instanceof Error
-        ? `${error.name}: ${error.message || '(messageなし)'}`
-        : String(error);
+      error instanceof Error ? `${error.name}: ${error.message || '(messageなし)'}` : String(error);
     const detail = rawDetail
       .replace(/https?:\/\/\S+/g, '[URL]')
       .replace(/ticket=[^\\s&]+/gi, 'ticket=[REDACTED]')

@@ -120,9 +120,10 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 
 - 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
 - ChatGPTへのアップロードが完了したら `window.openai.requestClose()` でWidgetを自動的に閉じます。取得・アップロードに失敗した場合だけWidgetを残し、再試行や原本ダウンロードを表示します。
-- ファイル名・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズは原本未取得時点では不明（`null`）です。
-- 自動アップロードは `library: true` を指定します。ただし実機では、Widgetから保存した直後のファイルがモデル側のFiles/Library検索へ即時に現れない場合があります。そのため確認用メッセージには `uploadFile` が返した `fileId` も明示し、ホスト側にFiles/Library操作がある場合は、そのfileIdを使ってモデル側からライブラリ保存・読取を試せるようにします。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
-- アップロード完了はPDF本文のモデル読取成功と同義ではありません。ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、さらに `uploadFile` が返した `fileId` をモデル可視テキストにも渡します。resource linkだけで本文が読めない場合、ホストがFiles/Library操作を提供していれば、そのfileIdを元ファイル参照としてライブラリへ保存してから読み取るフォールバックを使います。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetから会話へ添付するAPIとしては扱いません。
+- ファイルID・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズ・ファイル名・MIME型は原本未取得時点では不明（`null`）です。
+- `open_file_in_chat` はIDの構文検証と署名ticketの発行だけを行い、ScombZ教材ページを取得しません。教材情報はWidgetの `/files` アクセス時に一度解決し、実際のファイル名・MIME型をレスポンスヘッダーから受け取ります。準備時の `file.filename` と `mime_type` は `null` です。このツールのtext応答は短い要約とし、構造化データとのJSON重複を避けます。他ツールのtext応答は既存の互換性を維持します。
+- 自動アップロードは `library: true` を指定します。ただし実機では、Widgetから保存した直後のファイルがモデル側のFiles/Library検索へ即時に現れない場合があります。正常時の確認用メッセージは教材名と元の依頼を続行する指示だけにします。ファイル参照の受け渡しに失敗した場合のみ、`uploadFile` が返した `fileId` とFiles/Libraryによる保存・読取のフォールバック案内を送ります。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
+- アップロード完了はPDF本文のモデル読取成功と同義ではありません。ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、本文を実際に確認してから元の依頼を続行するように促します。特定ページの確認は指定しません。ファイル参照の受け渡しに失敗した場合だけfileIdをモデル可視テキストへ渡し、ホストがFiles/Library操作を提供していれば、そのfileIdを元ファイル参照としてライブラリへ保存してから読み取るフォールバックを使います。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetから会話へ添付するAPIとしては扱いません。
 - **PoCの未確認部分:** 自動（ユーザー操作なし）の `uploadFile` が全ChatGPTホストで許可されるか、モデル側Files/LibraryがWidgetの `fileId` を元ファイル参照として受け入れるか、`resource_link` を含む `ui/message` が新規アップロードPDFを通常の会話添付として安定してモデルへ渡せるか、ホスト固有のアップロード容量上限。失敗時だけWidgetに再試行ボタンを表示します。7.19 MiBのPDFで実ページの読取を確認してから、約50 MiBのPDFでも試してください。
 
 WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは署名付き `/files/` のGET/OPTIONSだけで、ブラウザが送るOriginをその応答に限って反映します。ChatGPT Web/Android/iOSなどホストごとのsandbox originを固定列挙しません。管理画面・OAuth・MCPへの別originアクセスは許可しません。CORSは認証の代わりではなく、期限・科目・ファイルに結びついた署名ticketを必ず検証し、ブラウザ経由ではadmin keyやOAuth bearerをticketの代用にできません。opaqueな `Origin: null` は許可しません。
