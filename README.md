@@ -104,9 +104,9 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 
 - 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
 - ファイル名・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズは原本未取得時点では不明（`null`）です。
-- 自動アップロードは `library: true` でChatGPTのファイルライブラリにも保存します。これにより、resource link経路とは別にFiles/Library側から再発見・読取できる可能性を持たせます。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
-- アップロード完了はPDF本文のモデル読取成功と同義ではありません。fileIdを文章へ含めるだけでは添付扱いにせず、ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、実際のページ内容を確認します。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetでアップロードしたファイルを会話へ添付するAPIとしては扱いません。
-- **PoCの未確認部分:** 自動（ユーザー操作なし）の `uploadFile` が全ChatGPTホストで許可されるか、`library: true` で保存した直後にFiles/Library検索へ安定して現れるか、`resource_link` を含む `ui/message` が新規アップロードPDFを通常の会話添付として安定してモデルへ渡せるか、ホスト固有のアップロード容量上限。失敗時だけWidgetに再試行ボタンを表示します。7.19 MiBのPDFで実ページの読取を確認してから、約50 MiBのPDFでも試してください。
+- 自動アップロードは `library: true` を指定します。ただし実機では、Widgetから保存した直後のファイルがモデル側のFiles/Library検索へ即時に現れない場合があります。そのため確認用メッセージには `uploadFile` が返した `fileId` も明示し、ホスト側にFiles/Library操作がある場合は、そのfileIdを使ってモデル側からライブラリ保存・読取を試せるようにします。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
+- アップロード完了はPDF本文のモデル読取成功と同義ではありません。ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、さらに `uploadFile` が返した `fileId` をモデル可視テキストにも渡します。resource linkだけで本文が読めない場合、ホストがFiles/Library操作を提供していれば、そのfileIdを元ファイル参照としてライブラリへ保存してから読み取るフォールバックを使います。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetから会話へ添付するAPIとしては扱いません。
+- **PoCの未確認部分:** 自動（ユーザー操作なし）の `uploadFile` が全ChatGPTホストで許可されるか、モデル側Files/LibraryがWidgetの `fileId` を元ファイル参照として受け入れるか、`resource_link` を含む `ui/message` が新規アップロードPDFを通常の会話添付として安定してモデルへ渡せるか、ホスト固有のアップロード容量上限。失敗時だけWidgetに再試行ボタンを表示します。7.19 MiBのPDFで実ページの読取を確認してから、約50 MiBのPDFでも試してください。
 
 WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは署名付き `/files/` のGET/OPTIONSだけで、ブラウザが送るOriginをその応答に限って反映します。ChatGPT Web/Android/iOSなどホストごとのsandbox originを固定列挙しません。管理画面・OAuth・MCPへの別originアクセスは許可しません。CORSは認証の代わりではなく、期限・科目・ファイルに結びついた署名ticketを必ず検証し、ブラウザ経由ではadmin keyやOAuth bearerをticketの代用にできません。opaqueな `Origin: null` は許可しません。
 
