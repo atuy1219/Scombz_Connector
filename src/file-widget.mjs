@@ -17,23 +17,3 @@ h1{font-size:17px;overflow-wrap:anywhere;margin:0 0 8px}p{font-size:14px;line-he
 <p id="note">アップロード後、ChatGPTがPDF本文を読めるか確認できます。</p>
 <p id="file-id" hidden></p><script>${browserScript.replaceAll('</script', '<\\/script')}</script></body></html>`;
 
-export function widgetOrigins(env, origin) {
-  const values = [
-    'https://web-sandbox.oaiusercontent.com',
-    origin,
-    ...(env.WIDGET_ALLOWED_ORIGINS ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  ];
-  return new Set(
-    values.filter((value) => {
-      try {
-        const u = new URL(value);
-        return u.protocol === 'https:' && u.origin === value;
-      } catch {
-        return false;
-      }
-    }),
-  );
-}
