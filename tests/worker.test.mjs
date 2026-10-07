@@ -105,6 +105,12 @@ before(async () => {
           headers: { Location: 'https://evil.example/steal' },
         });
       const path = new URL(request.url).pathname;
+      if (path === '/lms/timetable')
+        return new Response(
+          page(
+            '<input id="displayMode1" checked><div class="div-table-data-row"><span class="div-table-colomn-period">２時限</span><div class="3-yobicol"><div><button class="timetable-course-top-btn" id="c">データ構造</button></div></div></div>',
+          ),
+        );
       if (path === '/lms/course') return new Response(course);
       if (path === '/lms/course/make/tempfile') return new Response('temporary-id');
       if (path.startsWith('/lms/course/material/setfiledown/')) {
@@ -514,7 +520,7 @@ test('explicit session consent exports only SESSION without fetching or parsing 
     200,
   );
 });
-test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', async () => {
+test('read_file returns a direct HTTP plan without loading file bytes and keeps a scoped proxy fallback', async () => {
   const beforeRead = upstream;
   const response = await rpc(
     'read_file',
@@ -527,21 +533,34 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   assert.equal(value.format, 'pdf');
   assert.equal(value.text, null);
   assert.equal(Object.hasOwn(value, 'requested_pages'), false);
-  assert.equal(value.bytes, new TextEncoder().encode('%PDF-1.7 fixture').length);
+  assert.equal(value.bytes, null);
   assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
+  assert.equal(value.download_limit_scope, 'connector_proxy_only');
   assert.equal(value.retention, 'not_stored_by_connector');
-  assert.equal(value.delivery, 'mcp_embedded_resource');
-  const embedded = payload.result.content.find((x) => x.type === 'resource');
-  assert.ok(embedded);
-  assert.equal(embedded.resource.uri, 'scombz://material/first.pdf');
-  assert.equal(embedded.resource.mimeType, 'application/pdf');
-  assert.equal(atob(embedded.resource.blob), '%PDF-1.7 fixture');
-  const resourceLink = payload.result.content.find((x) => x.type === 'resource_link');
-  assert.ok(resourceLink);
-  assert.equal(resourceLink.uri, value.download_url);
-  assert.equal(resourceLink.name, 'first.pdf');
-  assert.equal(resourceLink.mimeType, 'application/pdf');
-  assert.ok(upstream > beforeRead, 'read_file must fetch the PDF body for embedding');
+  assert.equal(value.delivery, 'direct_authenticated_http');
+  assert.equal(
+    payload.result.content.some((x) => x.type === 'resource' || x.type === 'resource_link'),
+    false,
+  );
+  assert.equal(value.direct_download.authentication.required_scope, 'scombz:session');
+  assert.equal(value.direct_download.same_session_for_prepare_and_download, true);
+  assert.equal(
+    new URL(value.direct_download.prepare_request.url).searchParams.get('objectName'),
+    'o',
+  );
+  assert.equal(
+    new URL(value.direct_download.prepare_request.url).pathname,
+    '/lms/course/make/tempfile',
+  );
+  assert.ok(
+    value.direct_download.download_request.url_template.endsWith('fileId={temporary_file_id}'),
+  );
+  assert.equal(
+    upstream,
+    beforeRead + 1,
+    'read_file only retrieves material metadata, not a temp ID or original',
+  );
+  assert.ok(!JSON.stringify(payload).includes('private-fixture-cookie'));
   assert.ok(value.download_url);
   assert.ok(!value.download_url.includes('private-fixture-cookie'));
 
@@ -571,7 +590,7 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
     401,
   );
 });
-test('legacy page arguments are ignored and oversized embedded PDFs return a whole-file link', async () => {
+test('large PDFs return a small direct HTTP plan without embedding or downloading', async () => {
   upstreamMode = 'embedded-large';
   try {
     const response = await rpc(
@@ -588,17 +607,50 @@ test('legacy page arguments are ignored and oversized embedded PDFs return a who
     const payload = await response.json();
     assert.equal(payload.result.isError, undefined);
     assert.equal(payload.result.structuredContent.format, 'pdf');
-    assert.equal(payload.result.structuredContent.delivery, 'mcp_resource_link');
+    assert.equal(payload.result.structuredContent.delivery, 'direct_authenticated_http');
     assert.equal(Object.hasOwn(payload.result.structuredContent, 'requested_pages'), false);
     assert.equal(
       payload.result.content.some((item) => item.type === 'resource'),
       false,
     );
-    assert.ok(payload.result.content.some((item) => item.type === 'resource_link'));
+    assert.equal(
+      payload.result.content.some((item) => item.type === 'resource_link'),
+      false,
+    );
+    assert.ok(JSON.stringify(payload).length < 8192);
   } finally {
     upstreamMode = 'ok';
   }
 });
+test('current class context resolves JST timetable and returns public materials', async () => {
+  const result = await (
+    await rpc(
+      'get_current_class_context',
+      {
+        at: '2026-10-07T11:00:00+09:00',
+      },
+      { Authorization: 'Bearer ' + accessToken },
+    )
+  ).json();
+  const value = result.result.structuredContent;
+  assert.equal(value.status, 'matched');
+  assert.equal(value.course.course_id, 'c');
+  assert.equal(value.materials[0].file_id, 'material:m:r');
+  assert.equal(Object.hasOwn(value.materials[0], 'object_name'), false);
+  assert.deepEqual(value.assignments, []);
+  assert.equal(value.year, 2026);
+  const empty = await (
+    await rpc(
+      'get_current_class_context',
+      {
+        at: '2026-10-07T12:45:00+09:00',
+      },
+      { Authorization: 'Bearer ' + accessToken },
+    )
+  ).json();
+  assert.equal(empty.result.structuredContent.status, 'no_class');
+});
+
 test('refresh rotation cannot be replayed; tokens reject wrong audience and expiry', async () => {
   const data = {
     grant_type: 'refresh_token',

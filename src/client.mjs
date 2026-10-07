@@ -109,6 +109,23 @@ export function normalizeSession(input) {
   return { cookies, origins: [] };
 }
 
+export function resolveMaterialDownloadUrl(plan, temporary) {
+  if (!plan.prepare_request) return plan.download_request.url;
+  if (
+    typeof temporary !== 'string' ||
+    !temporary.trim() ||
+    temporary.length > 2048 ||
+    /[<>\r\n]/.test(temporary)
+  )
+    throw new ScombError('parse_error', '教材の一時ファイルIDを確認できません。');
+  const url = plan.download_request.url_template.replace(
+    '{temporary_file_id}',
+    encodeURIComponent(temporary.trim()),
+  );
+  validateReadUrl(url, true);
+  return url;
+}
+
 async function readBounded(response, maximum) {
   if (Number(response.headers.get('content-length') ?? 0) > maximum)
     throw new ScombError('file_too_large', 'ファイルが取得上限を超えています。');
@@ -535,49 +552,67 @@ export class ScombClient {
   async materialInfo(courseId, fileId) {
     return publicFile(await this.materialRecord(courseId, fileId));
   }
-  async openMaterialFile(courseId, fileId) {
+  async materialDownloadPlan(courseId, fileId) {
     const file = await this.materialRecord(courseId, fileId);
-    let download;
+    const filename = encodeURIComponent(file.filename.replace(/\s+/g, '_').replace(/_+/g, '_'));
     if (file.kind === 'material') {
-      const params = new URLSearchParams({
+      const prepare = new URLSearchParams({
         fileName: file.filename,
         objectName: file.object_name,
         id: file.resource_id,
         idnumber: courseId,
       });
-      const response = await this.request('/lms/course/make/tempfile?' + params, true);
-      const temporary = new TextDecoder().decode(await readBounded(response, 4096));
-      if (!temporary.trim() || temporary.length > 2048 || /[<>\r\n]/.test(temporary))
-        throw new ScombError('parse_error', '教材の一時ファイルIDを確認できません。');
       const query = new URLSearchParams({
         fileName: file.filename,
-        fileId: temporary,
         idnumber: courseId,
         resourceId: file.resource_id,
         screen: '1',
         contentId: file.content_id,
         endDate: file.end_date,
       });
-      download =
-        '/lms/course/material/setfiledown/' +
-        encodeURIComponent(file.filename.replace(/\s+/g, '_').replace(/_+/g, '_')) +
-        '?' +
-        query;
-    } else {
-      if (!/^\d+$/.test(file.download_mode))
-        throw new ScombError('parse_error', '添付ファイルのダウンロード区分を確認できません。');
-      const query = new URLSearchParams({
-        reportId: file.assignment_id,
-        idnumber: courseId,
-        downloadFileName: file.filename,
-        objectName: file.object_name,
-        downloadMode: file.download_mode,
-      });
-      download =
-        '/lms/course/report/submission_download/' +
-        encodeURIComponent(file.filename.replace(/\s+/g, '_').replace(/_+/g, '_')) +
-        '?' +
-        query;
+      return {
+        file: publicFile(file),
+        origin: BASE,
+        prepare_request: { method: 'GET', url: BASE + '/lms/course/make/tempfile?' + prepare },
+        download_request: {
+          method: 'GET',
+          url_template:
+            BASE +
+            '/lms/course/material/setfiledown/' +
+            filename +
+            '?' +
+            query +
+            '&fileId={temporary_file_id}',
+        },
+      };
+    }
+    if (!/^\d+$/.test(file.download_mode))
+      throw new ScombError('parse_error', '添付ファイルのダウンロード区分を確認できません。');
+    const query = new URLSearchParams({
+      reportId: file.assignment_id,
+      idnumber: courseId,
+      downloadFileName: file.filename,
+      objectName: file.object_name,
+      downloadMode: file.download_mode,
+    });
+    return {
+      file: publicFile(file),
+      origin: BASE,
+      prepare_request: null,
+      download_request: {
+        method: 'GET',
+        url: BASE + '/lms/course/report/submission_download/' + filename + '?' + query,
+      },
+    };
+  }
+  async openMaterialFile(courseId, fileId) {
+    const plan = await this.materialDownloadPlan(courseId, fileId);
+    const file = plan.file;
+    let download = plan.download_request.url;
+    if (plan.prepare_request) {
+      const response = await this.request(plan.prepare_request.url, true);
+      const temporary = new TextDecoder().decode(await readBounded(response, 4096));
+      download = resolveMaterialDownloadUrl(plan, temporary);
     }
     const response = await this.request(download, true);
     const mime = response.headers.get('content-type') ?? 'application/octet-stream';
@@ -594,7 +629,7 @@ export class ScombClient {
       throw new ScombError('unavailable', 'ファイルではなくHTMLが返りました。');
     }
     await this.saveSession();
-    return { metadata: publicFile(file), mime, response };
+    return { metadata: file, mime, response };
   }
   async materialFile(courseId, fileId, maximum = MAX_INLINE_FILE_BYTES) {
     const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);
