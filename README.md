@@ -109,7 +109,7 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 - アップロード完了はPDF本文のモデル読取成功と同義ではありません。状態は `upload_status: completed` と `model_readability: unverified` に分け、「PDFを読めるか確認する」で実際のページ内容を確認します。fileIdを文章へ含めるだけで添付になるとは仮定せず、PDFを `imageIds` にも入れません。
 - **PoCの未確認部分:** 通常ChatGPTホストでのサーバー取得BlobのuploadFile受け入れ、アップロード後の会話からのPDF参照、ホスト固有のアップロード容量上限。モックテストやfileIdの取得だけではこれらの成功を意味しません。7.19 MiBのPDFで実ページの読取を確認してから、約50 MiBのPDFでも試してください。
 
-WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは `https://web-sandbox.oaiusercontent.com` とWorker自身のoriginに対する、署名付き `/files/` のGET/OPTIONSだけです。管理画面・OAuth・MCPへの別originアクセスは許可しません。独自Widget originを使う場合だけ、Cloudflare環境変数 `WIDGET_ALLOWED_ORIGINS` に正確なHTTPS originをカンマ区切りで設定してください（ワイルドカードや `null` は不可）。CORSは認証の代わりにはならず、期限・科目・ファイルに結びついた署名を必ず検証します。
+WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは署名付き `/files/` のGET/OPTIONSだけで、ブラウザが送るOriginをその応答に限って反映します。ChatGPT Web/Android/iOSなどホストごとのsandbox originを固定列挙しません。管理画面・OAuth・MCPへの別originアクセスは許可しません。CORSは認証の代わりではなく、期限・科目・ファイルに結びついた署名ticketを必ず検証し、ブラウザ経由ではadmin keyやOAuth bearerをticketの代用にできません。opaqueな `Origin: null` は許可しません。
 
 公式仕様: https://developers.openai.com/plugins/reference 、 https://developers.openai.com/plugins/build/chatgpt-ui
 

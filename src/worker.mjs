@@ -4,7 +4,6 @@ import { mcpResponse } from './mcp.mjs';
 import { html, script } from './ui.mjs';
 import { configured, verify } from './crypto.mjs';
 import { oauth, admin, access, challenge, json, htmlResponse, readBody } from './oauth.mjs';
-import { widgetOrigins } from './file-widget.mjs';
 
 const discovery = new Set([
   'initialize',
@@ -19,13 +18,13 @@ const identifier = /^[A-Za-z0-9_-]{1,100}$/;
 export async function handle(request, env, options = {}) {
   const url = new URL(request.url);
   const browserOrigin = request.headers.get('origin');
-  const widgetRequest =
+  const fileBrowserRequest =
     url.pathname.startsWith('/files/') &&
     ['GET', 'OPTIONS'].includes(request.method) &&
     browserOrigin &&
-    widgetOrigins(env, url.origin).has(browserOrigin);
-  const response = await handleRequest(request, env, options, widgetRequest);
-  if (!widgetRequest) return response;
+    browserOrigin !== 'null';
+  const response = await handleRequest(request, env, options, fileBrowserRequest);
+  if (!fileBrowserRequest) return response;
   const headers = new Headers(response.headers);
   headers.set('Access-Control-Allow-Origin', browserOrigin);
   headers.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
@@ -33,12 +32,12 @@ export async function handle(request, env, options = {}) {
   headers.set('Vary', 'Origin');
   return new Response(response.body, { status: response.status, headers });
 }
-async function handleRequest(request, env, options = {}, widgetRequest = false) {
+async function handleRequest(request, env, options = {}, fileBrowserRequest = false) {
   const url = new URL(request.url),
     origin = url.origin;
   try {
     // Browser requests must come from this Worker; server-to-server MCP has no Origin.
-    if (request.headers.has('origin') && request.headers.get('origin') !== origin && !widgetRequest)
+    if (request.headers.has('origin') && request.headers.get('origin') !== origin && !fileBrowserRequest)
       return json({ message: '別サイトからのリクエストは受け付けません。' }, 403);
     const authResponse = await oauth(request, env, origin);
     if (authResponse) return authResponse;
@@ -197,10 +196,12 @@ async function handleRequest(request, env, options = {}, widgetRequest = false) 
         ticket.course_id === courseId &&
         ticket.file_id === fileId
       );
-      // A browser widget uses only its narrowly scoped ticket. Never allow it
-      // to reuse an admin key or OAuth bearer from another origin.
+      // Browser access to /files/ is authorized by the narrowly scoped signed ticket,
+      // not by a hard-coded ChatGPT sandbox origin. This keeps web/mobile hosts working
+      // even when their sandbox origin changes. Never let a browser reuse an admin key
+      // or OAuth bearer in place of the ticket.
       if (
-        (widgetRequest && !signedFile) ||
+        (fileBrowserRequest && !signedFile) ||
         (!signedFile && !(await access(request, env, origin)) && !(await admin(request, env)))
       )
         return json(
