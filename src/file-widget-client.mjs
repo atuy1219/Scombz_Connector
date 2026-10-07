@@ -213,9 +213,9 @@ async function startUpload() {
     const file = await downloadFile();
     phase = 'upload';
     status(
-      `原本取得成功: ${(file.size / 1048576).toFixed(2)} MiB\nChatGPTへ自動アップロード中…`,
+      `原本取得成功: ${(file.size / 1048576).toFixed(2)} MiB\nChatGPTへ自動アップロードし、ファイルライブラリへ保存中…`,
     );
-    const value = await window.openai.uploadFile(file, { library: false });
+    const value = await window.openai.uploadFile(file, { library: true });
     if (typeof value?.fileId !== 'string' || !value.fileId) throw new Error('upload_failed');
     uploaded = {
       file_id: value.fileId,
@@ -225,6 +225,7 @@ async function startUpload() {
       source_file_id: result.file.file_id,
       course_id: result.file.course_id,
       upload_status: 'completed',
+      library_saved: true,
       model_readability: 'unverified',
       model_context_linked: false,
       followup_sent: false,
