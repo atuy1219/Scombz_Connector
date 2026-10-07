@@ -139,7 +139,7 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(s.calls.uploads[0].file.size, bytes);
     assert.equal(s.calls.uploads[0].file.name, '講義.pdf');
     assert.equal(s.calls.uploads[0].file.type, 'application/pdf');
-    assert.equal(s.calls.uploads[0].options.library, false);
+    assert.equal(s.calls.uploads[0].options.library, true);
     assert.equal(s.calls.fetches[0].options.credentials, 'omit');
     assert.equal(s.calls.fetches[0].options.redirect, 'error');
     assert.equal(s.calls.downloadUrls[0], 'file-host-123');
@@ -150,6 +150,7 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
     assert.equal(link.uri, 'https://files.oaiusercontent.test/file-host-123');
+    assert.equal(s.calls.states.at(-1).modelContent.library_saved, true);
     assert.equal(s.calls.states.at(-1).modelContent.model_readability, 'verification_requested');
     assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, true);
     assert.equal(s.calls.states.at(-1).modelContent.delivery_mode, 'ui_message_resource_link');
