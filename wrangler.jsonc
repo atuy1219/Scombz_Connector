@@ -1,7 +1,8 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "scombz-connector",
-  "main": "src/worker.mjs",
+  "main": "dist/worker.mjs",
+  "build": { "command": "npm run build" },
   "compatibility_date": "2026-08-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,

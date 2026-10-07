@@ -98,6 +98,21 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 
 時限の出典: https://www.shibaura-it.ac.jp/campus_life/class/schedule.html
 
+## 通常チャットで教材原本を渡す（Widget PoC）
+
+`open_file_in_chat(course_id, file_id)` は教材アップロード画面を表示します。
+「ChatGPTへアップロード」を押すと、Workerが保存済みSESSIONで一時IDを発行して原本をストリーミングし、Widgetが `window.openai.uploadFile(File)` へ渡します。SESSIONはWidget・モデルへ渡しません。PDF本体はMCP応答を通らないため、MCPの埋め込み転送上限を避けます。既存の `read_file` によるWork向け直接HTTP取得も残しています。
+
+- 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
+- ファイル名・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズは原本未取得時点では不明（`null`）です。
+- 「ファイルライブラリにも保存する」は初期値OFF。ChatGPTの任意の拡張APIを機能検出し、未対応なら原本をダウンロードして会話へ添付する案内を表示します。
+- アップロード完了はPDF本文のモデル読取成功と同義ではありません。状態は `upload_status: completed` と `model_readability: unverified` に分け、「PDFを読めるか確認する」で実際のページ内容を確認します。fileIdを文章へ含めるだけで添付になるとは仮定せず、PDFを `imageIds` にも入れません。
+- **PoCの未確認部分:** 通常ChatGPTホストでのサーバー取得BlobのuploadFile受け入れ、アップロード後の会話からのPDF参照、ホスト固有のアップロード容量上限。モックテストやfileIdの取得だけではこれらの成功を意味しません。7.19 MiBのPDFで実ページの読取を確認してから、約50 MiBのPDFでも試してください。
+
+WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは `https://web-sandbox.oaiusercontent.com` とWorker自身のoriginに対する、署名付き `/files/` のGET/OPTIONSだけです。管理画面・OAuth・MCPへの別originアクセスは許可しません。独自Widget originを使う場合だけ、Cloudflare環境変数 `WIDGET_ALLOWED_ORIGINS` に正確なHTTPS originをカンマ区切りで設定してください（ワイルドカードや `null` は不可）。CORSは認証の代わりにはならず、期限・科目・ファイルに結びついた署名を必ず検証します。
+
+公式仕様: https://developers.openai.com/plugins/reference 、 https://developers.openai.com/plugins/build/chatgpt-ui
+
 ## Skill（任意）
 
 `skills/scombz/SKILL.md` に、教材取得の順序、期限の扱い、公開済み結果の読み方をまとめています。MCP自体はSkillなしでも動作します。

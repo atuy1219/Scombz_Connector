@@ -6,14 +6,16 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --test tests/*.test.mjs",
-    "test:browser": "node --test tests/browser-oauth.mjs",
+    "test:browser": "npm run build && node --test tests/browser-*.mjs",
     "dev": "wrangler dev",
     "deploy": "wrangler d1 migrations apply DB --remote && wrangler deploy",
     "db:local": "wrangler d1 migrations apply DB --local",
     "check": "npm test && npm run build && wrangler deploy --dry-run",
-    "format": "prettier --write \"src/**/*.mjs\" \"scripts/*.mjs\" \"tests/**/*.mjs\" package.json wrangler.jsonc \".github/workflows/*.yml\""
+    "format": "prettier --write \"src/**/*.mjs\" \"scripts/*.mjs\" \"tests/**/*.mjs\" package.json wrangler.jsonc \".github/workflows/*.yml\"",
+    "pretest": "npm run build"
   },
   "dependencies": {
+    "@modelcontextprotocol/ext-apps": "^2.0.3",
     "@modelcontextprotocol/sdk": "^1.28.0",
     "cheerio": "^1.2.0",
     "zod": "^4.0.0"
