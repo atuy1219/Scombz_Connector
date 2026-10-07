@@ -112,11 +112,14 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
     assert.ok(message.content[0].text.includes('2ページ目'));
+    assert.ok(message.content[0].text.includes('file-browser-fixture'));
+    assert.ok(message.content[0].text.includes('/ScombZ/'));
     const state = await ui.evaluate(() => window.savedStates.at(-1));
     assert.equal(state.modelContent.library_saved, true);
     assert.equal(state.modelContent.model_readability, 'verification_requested');
     assert.equal(state.modelContent.model_context_linked, true);
     assert.equal(state.modelContent.delivery_mode, 'ui_message_resource_link');
+    assert.equal(state.modelContent.library_handoff, 'model_file_id');
     assert.ok(!JSON.stringify(state).includes('ticket='));
     assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
     assert.equal(await frame.locator('#upload').isHidden(), true);
