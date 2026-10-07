@@ -188,6 +188,9 @@ test('upload rejection retries cached bytes; missing API and restored uploads do
   await s.elements.get('upload').onclick();
   assert.equal(s.calls.states.length, 0);
   assert.equal(s.elements.get('verify').hidden, true);
+  assert.ok(s.elements.get('status').textContent.includes('失敗箇所: ChatGPTアップロード'));
+  assert.ok(s.elements.get('status').textContent.includes('例外: Error: host rejected'));
+  assert.ok(s.elements.get('status').textContent.includes('原本取得は成功しています'));
   await s.elements.get('upload').onclick();
   assert.equal(s.calls.fetches.length, 1);
   assert.equal(s.calls.uploads.length, 2);
