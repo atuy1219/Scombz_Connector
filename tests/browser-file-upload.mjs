@@ -95,7 +95,7 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
         name: '講義.pdf',
         mime: 'application/pdf',
         signature: '%PDF-',
-        library: false,
+        library: true,
       },
     ]);
     assert.deepEqual(await ui.evaluate(() => window.downloadUrlCalls), ['file-browser-fixture']);
@@ -113,6 +113,7 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     assert.equal(link.mimeType, 'application/pdf');
     assert.ok(message.content[0].text.includes('2ページ目'));
     const state = await ui.evaluate(() => window.savedStates.at(-1));
+    assert.equal(state.modelContent.library_saved, true);
     assert.equal(state.modelContent.model_readability, 'verification_requested');
     assert.equal(state.modelContent.model_context_linked, true);
     assert.equal(state.modelContent.delivery_mode, 'ui_message_resource_link');
