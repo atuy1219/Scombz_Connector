@@ -77,7 +77,7 @@ async function screen({
       },
     ]),
   );
-  const calls = { uploads: [], fetches: [], states: [], downloadUrls: [] };
+  const calls = { uploads: [], fetches: [], states: [], downloadUrls: [], closes: 0 };
   const listeners = new Map();
   const openai = {
     ...globals,
@@ -94,6 +94,9 @@ async function screen({
           async getFileDownloadUrl({ fileId }) {
             calls.downloadUrls.push(fileId);
             return { downloadUrl: `https://files.oaiusercontent.test/${fileId}` };
+          },
+          async requestClose() {
+            calls.closes += 1;
           },
         }
       : {}),
@@ -160,6 +163,7 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.ok(!JSON.stringify(s.calls.states).includes('private-link'));
     assert.ok(!JSON.stringify(s.calls.states).includes('files.oaiusercontent.test'));
     assert.equal(s.elements.get('upload').hidden, true);
+    assert.equal(s.calls.closes, 1);
   }
 });
 
@@ -175,6 +179,7 @@ test('empty, HTML, over-limit and failed downloads never reach uploadFile and ex
     assert.equal(s.elements.get('verify').hidden, true);
     assert.equal(s.elements.get('upload').hidden, false);
     assert.equal(s.elements.get('upload').disabled, false);
+    assert.equal(s.calls.closes, 0);
   }
 });
 
