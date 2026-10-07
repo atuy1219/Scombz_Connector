@@ -18,6 +18,13 @@ const status = (text) => {
 const supported = () => typeof window.openai?.uploadFile === 'function';
 const canResolveUploadedFile = () =>
   typeof window.openai?.getFileDownloadUrl === 'function';
+const canCloseWidget = () => typeof window.openai?.requestClose === 'function';
+async function closeCompletedWidget() {
+  if (!uploaded || uploaded.upload_status !== 'completed' || !canCloseWidget()) return;
+  try {
+    await window.openai.requestClose();
+  } catch {}
+}
 
 function receive(value) {
   if (!value?.structuredContent?.file || !value?._meta?.file_transfer) return;
@@ -76,7 +83,11 @@ function receive(value) {
     void maybeAutoUpload();
   } else {
     status('アップロード完了。PDF本文を読めるかは未確認です。');
-    if (connected) void linkUploadedFile();
+    if (connected)
+      void linkUploadedFile().finally(() => {
+        void closeCompletedWidget();
+      });
+    else void closeCompletedWidget();
   }
 }
 
@@ -247,6 +258,7 @@ async function startUpload() {
       status('アップロード完了。モデルコンテキストへの受け渡しを待っています…');
       el('verify').hidden = false;
     }
+    await closeCompletedWidget();
   } catch (error) {
     const messages = {
       expired: '取得リンクの期限が切れました。リンクを更新してください。',
@@ -333,7 +345,10 @@ app
   .connect()
   .then(() => {
     connected = true;
-    if (uploaded) void linkUploadedFile();
+    if (uploaded)
+      void linkUploadedFile().finally(() => {
+        void closeCompletedWidget();
+      });
     else void maybeAutoUpload();
   })
   .catch(() => {
