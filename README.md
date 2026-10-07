@@ -56,7 +56,7 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `get_quiz` | 受験前の要項・公開済み結果 |
 | `list_surveys` / `get_survey` | アンケート一覧・設問・公開済み回答 |
 | `list_announcements` | お知らせ一覧 |
-| `read_file` | SESSIONによる直接HTTP取得手順と中継URLの代替 |
+| `read_file` | 高度な直接HTTP取得用。大量処理・ScombZページ調査・Widget非対応時のフォールバック |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
 | `get_current_course_tasks` | 現在の授業の課題・小テスト・アンケート一覧 |
@@ -66,9 +66,25 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 前期は `first`、後期は `second`。省略時は日本時間の現在期を使い、1〜3月は前年度後期として扱います。
 
-### 教材の直接取得
 
-`read_file(course_id, file_id)` は科目ページから教材の存在と取得パラメーターを確認し、`direct_download` に原本の直接取得手順を返します。原本本体・base64・分割リソースは返しません。ツールの応答だけで資料を読み終えたとは扱わないでください。
+### AIの教材取得ルーティング
+
+教材原本の取得方法は、Chat / Workというモード名だけで固定せず、**目的・必要権限・利用可能なホスト機能**で選びます。通常は最小権限のWidget経路を優先し、直接HTTP取得は高度な処理またはフォールバックに限定します。
+
+| 状況 | 推奨経路 | 理由 |
+| --- | --- | --- |
+| 1件〜少数の教材を取得・要約・比較する | `open_file_in_chat` | SESSIONをChatGPTへ渡さず、ChatGPT Filesへ原本を受け渡せる |
+| 取得済み教材を後で再利用する | `open_file_in_chat` → ChatGPT Files/Library | 原本をChatGPT側へ保持して再利用しやすい |
+| 多数の教材を連続取得・横断処理する | Work等の実行環境 + `read_file` + `get_web_session` | 直接HTTP処理の方がバッチ処理・ローカル解析に向く |
+| ScombZページ構造やページ内リンクを追加調査する | Work等の実行環境 + 直接HTTP | HTML・JavaScript・外部リンクを含む調査に向く |
+| Widget / `uploadFile` が利用できない、または失敗する | `read_file` + `get_web_session` | Widget経路のフォールバック |
+| 単にPDF原本を読みたい | **Widget経路を優先** | `scombz:session` の追加権限を要求しない |
+
+ConnectorがChatとWorkをサーバー側で厳密に判定して分岐するわけではありません。MCP instructions、各ツールのdescription、ホストが提供する機能、ユーザーの依頼内容をもとにChatGPT側が経路を選択します。したがって、WorkでもWidgetが利用でき、少数教材の取得だけで目的を満たすなら `open_file_in_chat` を使って構いません。一方、直接HTTP取得は `scombz:session` という強い権限を必要とするため、Widgetで目的を達成できる場合は優先しません。
+
+### 高度な教材の直接取得（Work / フォールバック）
+
+`read_file(course_id, file_id)` は、Widget経路では足りない高度な調査・大量処理、またはWidget非対応時のフォールバック用です。科目ページから教材の存在と取得パラメーターを確認し、`direct_download` に原本の直接取得手順を返します。原本本体・base64・分割リソースは返しません。通常の単一教材取得では、追加の `scombz:session` 権限を必要としない `open_file_in_chat` を優先してください。ツールの応答だけで資料を読み終えたとは扱わないでください。
 
 1. `get_web_session` でSESSIONを取得する。`scombz:session` の明示的なOAuth承認が必要。`read_file` 自体は従来の `scombz:read` のままで、Cookieを返さない。
 2. 教材の `prepare_request.url` をSESSION Cookie付きでGETし、一時ファイルIDを新規発行する。
@@ -90,7 +106,7 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 
 ### 現在の授業
 
-「今の授業の資料を取って要約して」には `get_current_class_context()` を使い、結果の `materials` から必要なファイルを `read_file` の手順に従って直接取得します。教材原本をまとめて取得するツールではありません。
+「今の授業の資料を取って要約して」にはまず `get_current_class_context()` を使って対象授業と教材を特定します。少数の教材を読むだけなら結果の `materials` から `open_file_in_chat` を使うのが標準です。多数の教材を連続処理する、ページ内リンクを追跡する、ScombZページ自体を追加調査するなど、Widget経路では不足する場合だけ `read_file` + `get_web_session` の直接取得へ切り替えます。`get_current_class_context()` 自体は教材原本をまとめて取得するツールではありません。
 
 4つの現在授業ツールは `at`（タイムゾーン付きISO日時、省略時は現在）、`year`、`semester`、`margin_minutes`（0〜30、省略時0）を受け取ります。日本時間の曜日と大学公式の時限（9:00–10:40、10:50–12:30、13:20–15:00、15:10–16:50、17:00–18:40、18:50–20:30）から本人のScombZ時間割を照合します。実際の授業時間帯を優先し、それ以外のときだけ前後の余裕時間を使います。
 
@@ -98,9 +114,9 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 
 時限の出典: https://www.shibaura-it.ac.jp/campus_life/class/schedule.html
 
-## 通常チャットで教材原本を渡す（Widget PoC）
+## 標準の教材取得（Chat / Widget）
 
-`open_file_in_chat(course_id, file_id)` は教材アップロードWidgetを表示します。Widgetは表示後に自動で、Workerが保存済みSESSIONを使って一時IDを発行し、原本をストリーミング取得して `window.openai.uploadFile(File)` へ渡します。通常時にアップロードボタン操作は不要です。アップロード後は `window.openai.getFileDownloadUrl({ fileId })` でChatGPT側の一時URLを取得し、MCP Appsの `ui/message` に `resource_link` を直接含めて本文確認ターンを自動送信します。`ui/message` がresource linkを受け付けないホストでは `ui/update-model-context` へ渡してからテキストメッセージを送るフォールバックを使います。SESSIONはWidget・モデルへ渡しません。PDF本体はMCP応答を通らないため、MCPの埋め込み転送上限を避けます。既存の `read_file` によるWork向け直接HTTP取得も残しています。
+`open_file_in_chat(course_id, file_id)` は、ChatGPTで教材原本を読むときの**標準経路**です。Chat / Workを問わず、Widgetと `uploadFile` が利用でき、少数教材の取得で目的を達成できる場合はこの経路を優先します。Widgetは表示後に自動で、Workerが保存済みSESSIONを使って一時IDを発行し、原本をストリーミング取得して `window.openai.uploadFile(File)` へ渡します。通常時にアップロードボタン操作は不要です。アップロード後は `window.openai.getFileDownloadUrl({ fileId })` でChatGPT側の一時URLを取得し、MCP Appsの `ui/message` に `resource_link` を直接含めて本文確認ターンを自動送信します。`ui/message` がresource linkを受け付けないホストでは `ui/update-model-context` へ渡してからテキストメッセージを送るフォールバックを使います。SESSIONはWidget・モデルへ渡しません。PDF本体はMCP応答を通らないため、MCPの埋め込み転送上限を避けます。`read_file` + `get_web_session` の直接HTTP取得は、大量処理・追加調査・Widget非対応時の高度な経路として残しています。
 
 - 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
 - ChatGPTへのアップロードが完了したら `window.openai.requestClose()` でWidgetを自動的に閉じます。取得・アップロードに失敗した場合だけWidgetを残し、再試行や原本ダウンロードを表示します。
