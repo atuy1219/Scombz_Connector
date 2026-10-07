@@ -4,8 +4,8 @@ import vm from 'node:vm';
 import { build } from 'esbuild';
 import { FILE_WIDGET_HTML } from '../src/file-widget.mjs';
 
-// Exercise the browser pipeline, mocking only host APIs and the MCP bridge.
-// Actual ChatGPT PDF ingestion remains an explicit manual acceptance test.
+// Exercise the browser pipeline, mocking only ChatGPT host APIs and the MCP bridge.
+// Actual ChatGPT Files/Library ingestion remains an explicit acceptance test.
 const compiled = await build({
   entryPoints: ['src/file-widget-client.mjs'],
   bundle: true,
@@ -25,8 +25,6 @@ const compiled = await build({
       export class App {
         constructor(info, capabilities) { globalThis.bridge = this; this.capabilities = capabilities; }
         async connect() {}
-        async updateModelContext(value) { globalThis.contexts.push(value); }
-        async sendMessage(value) { globalThis.messages.push(value); return {}; }
         async callServerTool(value) { globalThis.toolCalls.push(value); return globalThis.refreshResult; }
       }`,
         }));
@@ -62,6 +60,7 @@ async function screen({
   body = '%PDF-1.7 fixture',
   api = true,
   upload,
+  followUp,
   globals = {},
   fetcher,
   toolResult = response(),
@@ -73,11 +72,10 @@ async function screen({
         hidden: /^(upload|verify|refresh|download|file-id)$/.test(id),
         disabled: id === 'upload',
         textContent: '',
-        checked: false,
       },
     ]),
   );
-  const calls = { uploads: [], fetches: [], states: [], downloadUrls: [] };
+  const calls = { uploads: [], fetches: [], states: [], followups: [] };
   const listeners = new Map();
   const openai = {
     ...globals,
@@ -89,11 +87,11 @@ async function screen({
       ? {
           async uploadFile(file, options) {
             calls.uploads.push({ file, options });
-            return upload ? upload(file, options) : { fileId: 'file-host-123' };
+            return upload ? upload(file, options) : { fileId: 'sediment://file-host-123' };
           },
-          async getFileDownloadUrl({ fileId }) {
-            calls.downloadUrls.push(fileId);
-            return { downloadUrl: `https://files.oaiusercontent.test/${fileId}` };
+          async sendFollowUpMessage(value) {
+            calls.followups.push(value);
+            if (followUp) return followUp(value);
           },
         }
       : {}),
@@ -115,8 +113,6 @@ async function screen({
       calls.fetches.push({ url, options });
       return fetcher ? fetcher(url, options) : new Response(body);
     },
-    contexts: [],
-    messages: [],
     toolCalls: [],
     console,
   });
@@ -125,11 +121,16 @@ async function screen({
   await Promise.resolve();
   context.bridge.ontoolresult(toolResult);
   await settle(() => calls.uploads.length > 0 || !api || elements.get('upload').hidden === false);
-  await settle(() => context.messages.length > 0 || calls.uploads.length === 0 || elements.get('verify').hidden === false);
+  await settle(
+    () =>
+      calls.followups.length > 0 ||
+      calls.uploads.length === 0 ||
+      elements.get('verify').hidden === false,
+  );
   return { elements, calls, context, listeners, openai };
 }
 
-test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context', async () => {
+test('whole 7.19 and 50 MiB PDFs auto-upload and hand the normalized file ID to ChatGPT', async () => {
   for (const bytes of [7536336, 50 * 1048576]) {
     const body = new Uint8Array(bytes);
     body.set(new TextEncoder().encode('%PDF-1.7'));
@@ -142,25 +143,42 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(s.calls.uploads[0].options.library, true);
     assert.equal(s.calls.fetches[0].options.credentials, 'omit');
     assert.equal(s.calls.fetches[0].options.redirect, 'error');
-    assert.equal(s.calls.downloadUrls[0], 'file-host-123');
-    assert.equal(s.context.contexts.length, 0);
-    assert.equal(s.context.messages.length, 1);
-    assert.ok(s.context.messages[0].content[0].text.includes('2ページ目'));
-    assert.ok(s.context.messages[0].content[0].text.includes('file-host-123'));
-    assert.ok(s.context.messages[0].content[0].text.includes('/ScombZ/'));
-    const link = s.context.messages[0].content.find((x) => x.type === 'resource_link');
-    assert.equal(link.name, '講義.pdf');
-    assert.equal(link.mimeType, 'application/pdf');
-    assert.equal(link.uri, 'https://files.oaiusercontent.test/file-host-123');
-    assert.equal(s.calls.states.at(-1).modelContent.library_saved, true);
-    assert.equal(s.calls.states.at(-1).modelContent.model_readability, 'verification_requested');
-    assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, true);
-    assert.equal(s.calls.states.at(-1).modelContent.delivery_mode, 'ui_message_resource_link');
-    assert.equal(s.calls.states.at(-1).modelContent.library_handoff, 'model_file_id');
+
+    assert.equal(s.calls.followups.length, 1);
+    assert.ok(s.calls.followups[0].prompt.includes('2ページ目'));
+    assert.ok(s.calls.followups[0].prompt.includes('file-host-123'));
+    assert.ok(s.calls.followups[0].prompt.includes('source_file_ref.file_id'));
+    assert.ok(s.calls.followups[0].prompt.includes('/ScombZ/講義.pdf'));
+
+    const state = s.calls.states.at(-1).modelContent;
+    assert.equal(state.file_id, 'sediment://file-host-123');
+    assert.equal(state.files_source_file_id, 'file-host-123');
+    assert.equal(state.library_saved, true);
+    assert.equal(state.handoff_ready, true);
+    assert.equal(state.model_readability, 'verification_requested');
+    assert.equal(state.followup_sent, true);
+    assert.equal(state.delivery_mode, 'chatgpt_follow_up_file_id');
+    assert.equal(state.library_handoff, 'model_file_id');
     assert.ok(!JSON.stringify(s.calls.states).includes('private-link'));
-    assert.ok(!JSON.stringify(s.calls.states).includes('files.oaiusercontent.test'));
     assert.equal(s.elements.get('upload').hidden, true);
   }
+});
+
+test('follow-up steering rejection keeps the uploaded file ID ready without retrying ui/message', async () => {
+  const s = await screen({
+    followUp: async () => {
+      throw new Error('Steering requires an active compatible turn');
+    },
+  });
+  assert.equal(s.calls.uploads.length, 1);
+  assert.equal(s.calls.followups.length, 1);
+  const state = s.calls.states.at(-1).modelContent;
+  assert.equal(state.files_source_file_id, 'file-host-123');
+  assert.equal(state.handoff_ready, true);
+  assert.equal(state.followup_sent, false);
+  assert.equal(state.followup_error, 'follow_up_unavailable');
+  assert.ok(s.elements.get('status').textContent.includes('次のメッセージ'));
+  assert.ok(!s.elements.get('status').textContent.includes('Steering'));
 });
 
 test('empty, HTML, over-limit and failed downloads never reach uploadFile and expose retry', async () => {
@@ -190,7 +208,6 @@ test('expired link refreshes through its scoped tool and auto-retries', async ()
   await settle(() => s.calls.uploads.length === 1);
   assert.equal(s.context.toolCalls[0].name, 'open_file_in_chat');
   assert.equal(s.context.toolCalls[0].arguments.file_id, 'material:m:r');
-  assert.equal(s.calls.uploads.length, 1);
 });
 
 test('upload rejection exposes manual retry; restored uploads do not refetch original', async () => {
@@ -201,7 +218,7 @@ test('upload rejection exposes manual retry; restored uploads do not refetch ori
         rejected = false;
         throw new Error('host rejected');
       }
-      return { fileId: 'file-host-123' };
+      return { fileId: 'sediment://file-host-123' };
     },
   });
   assert.equal(s.calls.states.length, 0);
@@ -210,7 +227,7 @@ test('upload rejection exposes manual retry; restored uploads do not refetch ori
   assert.ok(s.elements.get('status').textContent.includes('失敗箇所: ChatGPTアップロード'));
   assert.ok(s.elements.get('status').textContent.includes('例外: Error: host rejected'));
   await s.elements.get('upload').onclick();
-  await settle(() => s.context.messages.length === 1);
+  await settle(() => s.calls.followups.length === 1);
   assert.equal(s.calls.fetches.length, 1);
   assert.equal(s.calls.uploads.length, 2);
 
