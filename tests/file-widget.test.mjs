@@ -146,6 +146,8 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(s.context.contexts.length, 0);
     assert.equal(s.context.messages.length, 1);
     assert.ok(s.context.messages[0].content[0].text.includes('2ページ目'));
+    assert.ok(s.context.messages[0].content[0].text.includes('file-host-123'));
+    assert.ok(s.context.messages[0].content[0].text.includes('/ScombZ/'));
     const link = s.context.messages[0].content.find((x) => x.type === 'resource_link');
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
@@ -154,6 +156,7 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(s.calls.states.at(-1).modelContent.model_readability, 'verification_requested');
     assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, true);
     assert.equal(s.calls.states.at(-1).modelContent.delivery_mode, 'ui_message_resource_link');
+    assert.equal(s.calls.states.at(-1).modelContent.library_handoff, 'model_file_id');
     assert.ok(!JSON.stringify(s.calls.states).includes('private-link'));
     assert.ok(!JSON.stringify(s.calls.states).includes('files.oaiusercontent.test'));
     assert.equal(s.elements.get('upload').hidden, true);
