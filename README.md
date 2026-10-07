@@ -103,6 +103,7 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 `open_file_in_chat(course_id, file_id)` は教材アップロードWidgetを表示します。Widgetは表示後に自動で、Workerが保存済みSESSIONを使って一時IDを発行し、原本をストリーミング取得して `window.openai.uploadFile(File)` へ渡します。通常時にアップロードボタン操作は不要です。アップロード後は `window.openai.getFileDownloadUrl({ fileId })` でChatGPT側の一時URLを取得し、MCP Appsの `ui/message` に `resource_link` を直接含めて本文確認ターンを自動送信します。`ui/message` がresource linkを受け付けないホストでは `ui/update-model-context` へ渡してからテキストメッセージを送るフォールバックを使います。SESSIONはWidget・モデルへ渡しません。PDF本体はMCP応答を通らないため、MCPの埋め込み転送上限を避けます。既存の `read_file` によるWork向け直接HTTP取得も残しています。
 
 - 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
+- ChatGPTへのアップロードが完了したら `window.openai.requestClose()` でWidgetを自動的に閉じます。取得・アップロードに失敗した場合だけWidgetを残し、再試行や原本ダウンロードを表示します。
 - ファイル名・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズは原本未取得時点では不明（`null`）です。
 - 自動アップロードは `library: true` を指定します。ただし実機では、Widgetから保存した直後のファイルがモデル側のFiles/Library検索へ即時に現れない場合があります。そのため確認用メッセージには `uploadFile` が返した `fileId` も明示し、ホスト側にFiles/Library操作がある場合は、そのfileIdを使ってモデル側からライブラリ保存・読取を試せるようにします。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
 - アップロード完了はPDF本文のモデル読取成功と同義ではありません。ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、さらに `uploadFile` が返した `fileId` をモデル可視テキストにも渡します。resource linkだけで本文が読めない場合、ホストがFiles/Library操作を提供していれば、そのfileIdを元ファイル参照としてライブラリへ保存してから読み取るフォールバックを使います。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetから会話へ添付するAPIとしては扱いません。
