@@ -118,9 +118,13 @@ el('upload').onclick = async () => {
   busy = true;
   el('upload').disabled = true;
   el('library').disabled = true;
+  let phase = 'download';
   try {
     const file = await downloadFile();
-    status('ChatGPTへアップロード中…');
+    phase = 'upload';
+    status(
+      `原本取得成功: ${(file.size / 1048576).toFixed(2)} MiB\nChatGPTへアップロード中…`,
+    );
     const value = await window.openai.uploadFile(file, { library: el('library').checked });
     if (typeof value?.fileId !== 'string' || !value.fileId) throw new Error('upload_failed');
     uploaded = {
@@ -150,11 +154,29 @@ el('upload').onclick = async () => {
       invalid_pdf: '取得したファイルはPDF原本ではありません。',
       download_failed: '教材を取得できませんでした。再試行してください。',
     };
+    const phaseLabels = {
+      download: '原本取得',
+      upload: 'ChatGPTアップロード',
+    };
+    const rawDetail =
+      error instanceof Error
+        ? `${error.name}: ${error.message || '(messageなし)'}`
+        : String(error);
+    // Signed download URLs contain short-lived tickets. Never expose them in diagnostics.
+    const detail = rawDetail
+      .replace(/https?:\\/\\/\\S+/g, '[URL]')
+      .replace(/ticket=[^\\s&]+/gi, 'ticket=[REDACTED]')
+      .slice(0, 500);
+    const known = messages[error?.message];
     status(
-      messages[error.message] ??
-        'アップロードを完了できませんでした。再試行するか、原本を会話に添付してください。',
+      `失敗箇所: ${phaseLabels[phase] ?? phase}\n` +
+        (known ? `${known}\n` : '') +
+        `例外: ${detail}\n` +
+        (phase === 'upload'
+          ? '原本取得は成功しています。ChatGPT側のアップロード処理で失敗しました。'
+          : '再試行するか、原本をダウンロードして会話に添付してください。'),
     );
-    el('refresh').hidden = error.message !== 'expired';
+    el('refresh').hidden = error?.message !== 'expired';
   } finally {
     busy = false;
     el('upload').disabled = !!uploaded || !supported();
