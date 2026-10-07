@@ -25,8 +25,15 @@ const compiled = await build({
       export class App {
         constructor(info, capabilities) { globalThis.bridge = this; this.capabilities = capabilities; }
         async connect() {}
-        async updateModelContext(value) { globalThis.contexts.push(value); }
-        async sendMessage(value) { globalThis.messages.push(value); return {}; }
+        async updateModelContext(value) {
+          if (globalThis.rejectModelContext) throw new Error('context rejected');
+          globalThis.contexts.push(value);
+        }
+        async sendMessage(value) {
+          if (globalThis.rejectResourceMessages && value.content.some(x => x.type === 'resource_link'))
+            return { isError: true };
+          globalThis.messages.push(value); return {};
+        }
         async callServerTool(value) { globalThis.toolCalls.push(value); return globalThis.refreshResult; }
       }`,
         }));
@@ -65,6 +72,8 @@ async function screen({
   globals = {},
   fetcher,
   toolResult = response(),
+  rejectResourceMessages = false,
+  rejectModelContext = false,
 } = {}) {
   const elements = new Map(
     [...FILE_WIDGET_HTML.matchAll(/id="([^"]+)"/g)].map(([, id]) => [
@@ -121,6 +130,8 @@ async function screen({
     contexts: [],
     messages: [],
     toolCalls: [],
+    rejectResourceMessages,
+    rejectModelContext,
     console,
   });
   vm.runInContext(script, context);
@@ -128,7 +139,12 @@ async function screen({
   await Promise.resolve();
   context.bridge.ontoolresult(toolResult);
   await settle(() => calls.uploads.length > 0 || !api || elements.get('upload').hidden === false);
-  await settle(() => context.messages.length > 0 || calls.uploads.length === 0 || elements.get('verify').hidden === false);
+  await settle(
+    () =>
+      context.messages.length > 0 ||
+      calls.uploads.length === 0 ||
+      elements.get('verify').hidden === false,
+  );
   return { elements, calls, context, listeners, openai };
 }
 
@@ -148,9 +164,10 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(s.calls.downloadUrls[0], 'file-host-123');
     assert.equal(s.context.contexts.length, 0);
     assert.equal(s.context.messages.length, 1);
-    assert.ok(s.context.messages[0].content[0].text.includes('2ページ目'));
-    assert.ok(s.context.messages[0].content[0].text.includes('file-host-123'));
-    assert.ok(s.context.messages[0].content[0].text.includes('/ScombZ/'));
+    assert.ok(s.context.messages[0].content[0].text.includes('元の依頼を続行'));
+    assert.ok(!s.context.messages[0].content[0].text.includes('2ページ目'));
+    assert.ok(s.context.messages[0].content[0].text.includes('file-host-123') === false);
+    assert.ok(s.context.messages[0].content[0].text.includes('source_file_ref') === false);
     const link = s.context.messages[0].content.find((x) => x.type === 'resource_link');
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
@@ -159,12 +176,55 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(s.calls.states.at(-1).modelContent.model_readability, 'verification_requested');
     assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, true);
     assert.equal(s.calls.states.at(-1).modelContent.delivery_mode, 'ui_message_resource_link');
-    assert.equal(s.calls.states.at(-1).modelContent.library_handoff, 'model_file_id');
+    assert.equal(s.calls.states.at(-1).modelContent.library_handoff, 'resource_link');
     assert.ok(!JSON.stringify(s.calls.states).includes('private-link'));
     assert.ok(!JSON.stringify(s.calls.states).includes('files.oaiusercontent.test'));
     assert.equal(s.elements.get('upload').hidden, true);
     assert.equal(s.calls.closes, 1);
   }
+});
+
+test('deferred metadata comes from download headers and still validates PDF bytes', async () => {
+  const deferred = response();
+  deferred.structuredContent.file.filename = null;
+  deferred.structuredContent.mime_type = null;
+  const headers = {
+    'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent("講義 資料'2.pdf")}`,
+    'content-type': 'application/octet-stream',
+  };
+  const s = await screen({
+    toolResult: deferred,
+    fetcher: () => new Response('%PDF-1.7 fixture', { headers }),
+  });
+  assert.equal(s.calls.uploads[0].file.name, "講義 資料'2.pdf");
+  assert.equal(s.calls.uploads[0].file.type, 'application/pdf');
+  assert.equal(s.context.messages[0].content[1].name, "講義 資料'2.pdf");
+  for (const fetcher of [
+    () => new Response('<html>login</html>', { headers }),
+    () => new Response('%PDF-1.7 fixture'),
+  ]) {
+    const failed = await screen({ toolResult: deferred, fetcher });
+    assert.equal(failed.calls.uploads.length, 0);
+  }
+});
+
+test('resource link rejection uses model context without verbose follow-up', async () => {
+  const s = await screen({ rejectResourceMessages: true });
+  assert.equal(s.context.contexts[0].content[1].type, 'resource_link');
+  assert.equal(s.context.messages.length, 1);
+  assert.ok(!s.context.messages[0].content[0].text.includes('file-host-123'));
+  assert.equal(s.calls.states.at(-1).modelContent.delivery_mode, 'update_model_context_fallback');
+});
+
+test('fileId instructions are sent only after both resource link paths fail', async () => {
+  const s = await screen({ rejectResourceMessages: true, rejectModelContext: true });
+  await settle(() => s.calls.states.at(-1)?.modelContent.file_id_fallback_sent);
+  assert.equal(s.context.messages.length, 1);
+  assert.ok(s.context.messages[0].content[0].text.includes('file-host-123'));
+  assert.ok(s.context.messages[0].content[0].text.includes('source_file_ref.file_id'));
+  assert.ok(!s.context.messages[0].content[0].text.includes('2ページ目'));
+  assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, false);
+  assert.equal(s.calls.uploads.length, 1);
 });
 
 test('empty, HTML, over-limit and failed downloads never reach uploadFile and expose retry', async () => {

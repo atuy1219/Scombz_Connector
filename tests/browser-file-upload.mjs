@@ -13,8 +13,8 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     bytes.write('%PDF-1.7');
     const result = {
       structuredContent: {
-        file: { course_id: 'c', file_id: 'material:m:r', filename: '講義.pdf' },
-        mime_type: 'application/pdf',
+        file: { course_id: 'c', file_id: 'material:m:r', filename: null },
+        mime_type: null,
       },
       _meta: {
         file_transfer: {
@@ -81,7 +81,11 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
       route.fulfill({
         contentType: 'application/pdf',
         body: bytes,
-        headers: { 'Access-Control-Allow-Origin': '*' },
+        headers: {
+          'Access-Control-Allow-Origin': '*',
+          'Access-Control-Expose-Headers': 'Content-Disposition',
+          'Content-Disposition': `attachment; filename*=UTF-8''${encodeURIComponent('講義.pdf')}`,
+        },
       }),
     );
     await page.goto('https://host.test/');
@@ -115,15 +119,15 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     assert.equal(link.uri, 'https://files.oaiusercontent.test/file-browser-fixture');
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
-    assert.ok(message.content[0].text.includes('2ページ目'));
-    assert.ok(message.content[0].text.includes('file-browser-fixture'));
-    assert.ok(message.content[0].text.includes('/ScombZ/'));
+    assert.ok(message.content[0].text.includes('元の依頼を続行'));
+    assert.ok(message.content[0].text.includes('file-browser-fixture') === false);
+    assert.ok(message.content[0].text.includes('source_file_ref') === false);
     const state = await ui.evaluate(() => window.savedStates.at(-1));
     assert.equal(state.modelContent.library_saved, true);
     assert.equal(state.modelContent.model_readability, 'verification_requested');
     assert.equal(state.modelContent.model_context_linked, true);
     assert.equal(state.modelContent.delivery_mode, 'ui_message_resource_link');
-    assert.equal(state.modelContent.library_handoff, 'model_file_id');
+    assert.equal(state.modelContent.library_handoff, 'resource_link');
     assert.ok(!JSON.stringify(state).includes('ticket='));
     assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
     assert.equal(await frame.locator('#upload').isHidden(), true);

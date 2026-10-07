@@ -605,7 +605,11 @@ test('chat widget keeps scoped links private, serves its UI and authenticates be
   assert.equal(payload.result.structuredContent.upload_status, 'not_started');
   assert.equal(payload.result.structuredContent.model_readability, 'unverified');
   assert.equal(payload.result.structuredContent.size_bytes, null);
-  assert.equal(upstream, before + 1, 'only material metadata is fetched');
+  assert.equal(upstream, before, 'opening the Widget does not fetch ScombZ metadata');
+  assert.equal(payload.result.structuredContent.file.filename, null);
+  assert.equal(payload.result.structuredContent.mime_type, null);
+  assert.ok(!payload.result.content[0].text.includes('file_id'));
+  assert.ok(!payload.result.structuredContent._summary);
   assert.ok(!JSON.stringify(payload.result.content).includes('ticket='));
   assert.ok(!JSON.stringify(payload.result.structuredContent).includes('ticket='));
   assert.ok(!JSON.stringify(payload).includes('private-fixture-cookie'));
