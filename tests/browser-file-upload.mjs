@@ -31,6 +31,7 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
       window.uploads = [];
       window.savedStates = [];
       window.downloadUrlCalls = [];
+      window.closeRequests = 0;
       window.openai = {
         async uploadFile(file, options) {
           window.uploads.push({
@@ -48,6 +49,9 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
         },
         setWidgetState(state) {
           window.savedStates.push(state);
+        },
+        async requestClose() {
+          window.closeRequests += 1;
         },
       };
     });
@@ -123,6 +127,7 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     assert.ok(!JSON.stringify(state).includes('ticket='));
     assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
     assert.equal(await frame.locator('#upload').isHidden(), true);
+    assert.equal(await ui.evaluate(() => window.closeRequests), 1);
   } finally {
     await browser.close();
   }
