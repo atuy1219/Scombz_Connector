@@ -56,8 +56,7 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `get_quiz` | 受験前の要項・公開済み結果 |
 | `list_surveys` / `get_survey` | アンケート一覧・設問・公開済み回答 |
 | `list_announcements` | お知らせ一覧 |
-| `read_file` | 小さいPDFを直接返却／原本リンク・分割取得案内 |
-| `read_file_chunk` | 最大1MiBずつ原本を取得（5MiB超も対応） |
+| `read_file` | SESSIONによる直接HTTP取得手順と中継URLの代替 |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
 | `get_current_course_tasks` | 現在の授業の課題・小テスト・アンケート一覧 |
@@ -67,30 +66,31 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 前期は `first`、後期は `second`。省略時は日本時間の現在期を使い、1〜3月は前年度後期として扱います。
 
-### PDFと資料リンク
+### 教材の直接取得
 
-`read_file` は「PDF全体を1回取得するツール」です。引数は `course_id` と `file_id` のみで、`start_page`・`end_page`・`max_chars` は公開しません。PDF結果に `requested_pages` は含めません。同一PDFについて `read_file` を繰り返し呼ばず、初回に生成されたChatGPTファイルを再利用します。続きや特定ページはChatGPT側のFilesで、必要に応じて複数回読み取ります。
+`read_file(course_id, file_id)` は科目ページから教材の存在と取得パラメーターを確認し、`direct_download` に原本の直接取得手順を返します。原本本体・base64・分割リソースは返しません。ツールの応答だけで資料を読み終えたとは扱わないでください。
 
-原本ダウンロードは**100MiBまで**です。3MiB以下のPDFは原本全体をMCP埋め込みリソースで返し、それを超えるPDFとその他のバイナリは**MCP `resource_link`**と10分間有効な署名付きHTTPS URLからストリーミング取得します。テキスト形式は最大8MiBまでWorker内で読み込み、本文を最大40000文字まで返します。大きなファイルは原本リンクまたは分割取得を使用します。`read_file` は原本をConnectorへ永続保存しません。
+1. `get_web_session` でSESSIONを取得する。`scombz:session` の明示的なOAuth承認が必要。`read_file` 自体は従来の `scombz:read` のままで、Cookieを返さない。
+2. 教材の `prepare_request.url` をSESSION Cookie付きでGETし、一時ファイルIDを新規発行する。
+3. 応答が空・2048文字超・HTML・改行を含む場合は停止する。有効なら前後の空白を除き、`encodeURIComponent`相当でURLエンコードして `download_request.url_template` の `{temporary_file_id}` に入れる。
+4. **同じSESSION**で原本URLをGETする。課題添付は `prepare_request: null` なので `download_request.url` をそのまま使う。
+5. HTTP 200だけで成功とせず、空でない本文と期待するファイル形式を確認する。PDFなら `%PDF-` の先頭署名を確認する。
 
-リンクは特定の科目・ファイル・Workerだけに使えます。有効期間内にリンクを知る人は原本を取得できるため、公開しないでください。リンクが期限切れでも取得済みのChatGPTファイルを再利用します。原本取得に失敗しChatGPTファイルが生成されていない場合だけ `read_file` を再実行します。管理画面の「接続を解除」はOAuthトークンを無効にしますが、すでに発行した資料リンクは最大10分残ります。「セッションを削除」すると資料リンクでの取得も停止します。
+古い一時IDでは200でも本文が空になることがあります。空本文のときだけ一時IDを再発行して1回再試行してください。SESSIONの認証切れが確認された場合だけ `get_web_session(refresh=true)` を使い、一時IDも新規発行します。取得済みファイルは再利用し、特定ページの確認や本文抽出は実行環境側で行います。
 
-### 5MiB超の原本と実体化確認
+Cookieは実行環境のメモリ内だけで使用し、通常の返信・ログ・コマンド引数・保存ファイルへ載せません。通信先は `https://scombz.shibaura-it.ac.jp` に限定し、リダイレクトを追跡しません。原本はScombZから実行環境へ直接流れるため、MCPのtool resultサイズに左右されません。直接取得の容量上限は実行環境側で適用してください。
 
-base64は原本の約1.33倍になるため、埋め込みは3MiBまでに抑え、tool resultを小さく保ちます。リンクを取り込めないホストでは `read_file_chunk(course_id, file_id, offset, length)` を使用できます。`length` は1〜1048576、`offset` は0始まりです。返却された埋め込みresourceの `blob` をbase64デコードして連結し、`next_offset` を次のoffsetとして `eof: true` まで取得します。これはバイト分割でありPDFページ分割ではありません。途中で原本が変更される可能性がある場合は最初から取得してください。原本を時点固定するキャッシュはありません。
+2026-10-07の本人指定資料で、SESSION付きの直接HTTP取得を確認しました。渡部研PDFは53,247,528バイト（50.78MiB）全体、パトハック研PDFは原本サイズ7,536,336バイト（7.19MiB）のうち先頭6MiBを取得し、HTTP 200・application/pdf・PDF署名を確認しています。原本・Cookie・実教材情報はリポジトリに保存していません。
 
-MCP `resources/templates/list` には次のリソースも登録しています。`resources/read` は通常の `scombz:read` OAuth認証が必要です。公開URLやSESSION受け渡しを使わず、同じMCP接続で読み取れます。
+### 中継URLと確認ポリシー
 
-- `scombz://files/{course_id}/{file_id}` — 3MiB以下の原本。file_idはURLエンコード。
-- `scombz://files/{course_id}/{file_id}/chunks/{offset}/{length}` — 最大1MiBの分割原本。
+`download_url` は直接取得ができない環境だけの代替です。`download_url_role: connector_proxy_fallback_only` として返し、Connectorの `/files/` が保存済み認証でScombZから原本をストリーミング取得します。中継上限は100MiB、署名付きリンクは10分間有効です。教材はConnectorへ永続保存しません。リンクを公開・無関係なサービスへ転送しないでください。管理画面でOAuth接続を解除しても、発行済みリンクは最大10分残ります。ScombZ認証の削除で中継取得も停止します。
 
-ScombZへHTTP Rangeを要求し、対応する場合は必要な範囲のみ取得します。対応しない場合はストリームを読み飛ばして範囲末尾で中断します。この場合、後半の分割取得ほど上流通信量が増えるため、HTTPS原本リンクでの一括取得を優先してください。追加のR2設定や教材の永続保存は不要です。
-
-全読み取りツールに `readOnlyHint: true` / `openWorldHint: false` を指定し、Connector自身は資料取得時の追加承認を要求しません。ただしChatGPT側の実体化・接続・ツール承認ポリシーをサーバーから変更することはできません。埋め込みresourceや認証済みMCP分割取得によって外部URLの取り込みを回避できますが、ホストが必ず確認なしに処理する保証はありません。ChatGPT上での実体化UXはデプロイ・接続更新後の実機確認が必要です。
+読み取りツールには `readOnlyHint: true` / `openWorldHint: false` を指定しています。資料取得を依頼済みならConnector独自の実体化確認を追加で要求しません。ただしSESSIONのOAuth承認やホスト側の実体化・通信・ツール承認ポリシーをサーバーから無条件許可にはできません。
 
 ### 現在の授業
 
-「今の授業の資料を取って要約して」には `get_current_class_context()` を使い、結果の `materials` から必要なファイルを `read_file` で読み取ります。教材原本をまとめて取得するツールではありません。
+「今の授業の資料を取って要約して」には `get_current_class_context()` を使い、結果の `materials` から必要なファイルを `read_file` の手順に従って直接取得します。教材原本をまとめて取得するツールではありません。
 
 4つの現在授業ツールは `at`（タイムゾーン付きISO日時、省略時は現在）、`year`、`semester`、`margin_minutes`（0〜30、省略時0）を受け取ります。日本時間の曜日と大学公式の時限（9:00–10:40、10:50–12:30、13:20–15:00、15:10–16:50、17:00–18:40、18:50–20:30）から本人のScombZ時間割を照合します。実際の授業時間帯を優先し、それ以外のときだけ前後の余裕時間を使います。
 

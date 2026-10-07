@@ -114,11 +114,6 @@ before(async () => {
       if (path === '/lms/course') return new Response(course);
       if (path === '/lms/course/make/tempfile') return new Response('temporary-id');
       if (path.startsWith('/lms/course/material/setfiledown/')) {
-        if (upstreamMode === 'chunk-large') {
-          const bytes = new Uint8Array(6 * 1024 * 1024 + 17);
-          for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
-          return new Response(bytes, { headers: { 'Content-Type': 'application/pdf' } });
-        }
         if (upstreamMode === 'embedded-large')
           return new Response('%PDF-1.7 fixture', {
             headers: {
@@ -525,7 +520,7 @@ test('explicit session consent exports only SESSION without fetching or parsing 
     200,
   );
 });
-test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', async () => {
+test('read_file returns a direct HTTP plan without loading file bytes and keeps a scoped proxy fallback', async () => {
   const beforeRead = upstream;
   const response = await rpc(
     'read_file',
@@ -538,21 +533,34 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   assert.equal(value.format, 'pdf');
   assert.equal(value.text, null);
   assert.equal(Object.hasOwn(value, 'requested_pages'), false);
-  assert.equal(value.bytes, new TextEncoder().encode('%PDF-1.7 fixture').length);
+  assert.equal(value.bytes, null);
   assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
+  assert.equal(value.download_limit_scope, 'connector_proxy_only');
   assert.equal(value.retention, 'not_stored_by_connector');
-  assert.equal(value.delivery, 'mcp_embedded_resource');
-  const embedded = payload.result.content.find((x) => x.type === 'resource');
-  assert.ok(embedded);
-  assert.equal(embedded.resource.uri, 'scombz://files/c/material%3Am%3Ar');
-  assert.equal(embedded.resource.mimeType, 'application/pdf');
-  assert.equal(atob(embedded.resource.blob), '%PDF-1.7 fixture');
-  const resourceLink = payload.result.content.find((x) => x.type === 'resource_link');
-  assert.ok(resourceLink);
-  assert.equal(resourceLink.uri, value.download_url);
-  assert.equal(resourceLink.name, 'first.pdf');
-  assert.equal(resourceLink.mimeType, 'application/pdf');
-  assert.ok(upstream > beforeRead, 'read_file must fetch the PDF body for embedding');
+  assert.equal(value.delivery, 'direct_authenticated_http');
+  assert.equal(
+    payload.result.content.some((x) => x.type === 'resource' || x.type === 'resource_link'),
+    false,
+  );
+  assert.equal(value.direct_download.authentication.required_scope, 'scombz:session');
+  assert.equal(value.direct_download.same_session_for_prepare_and_download, true);
+  assert.equal(
+    new URL(value.direct_download.prepare_request.url).searchParams.get('objectName'),
+    'o',
+  );
+  assert.equal(
+    new URL(value.direct_download.prepare_request.url).pathname,
+    '/lms/course/make/tempfile',
+  );
+  assert.ok(
+    value.direct_download.download_request.url_template.endsWith('fileId={temporary_file_id}'),
+  );
+  assert.equal(
+    upstream,
+    beforeRead + 1,
+    'read_file only retrieves material metadata, not a temp ID or original',
+  );
+  assert.ok(!JSON.stringify(payload).includes('private-fixture-cookie'));
   assert.ok(value.download_url);
   assert.ok(!value.download_url.includes('private-fixture-cookie'));
 
@@ -582,7 +590,7 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
     401,
   );
 });
-test('legacy page arguments are ignored and oversized embedded PDFs return a whole-file link', async () => {
+test('large PDFs return a small direct HTTP plan without embedding or downloading', async () => {
   upstreamMode = 'embedded-large';
   try {
     const response = await rpc(
@@ -599,77 +607,17 @@ test('legacy page arguments are ignored and oversized embedded PDFs return a who
     const payload = await response.json();
     assert.equal(payload.result.isError, undefined);
     assert.equal(payload.result.structuredContent.format, 'pdf');
-    assert.equal(payload.result.structuredContent.delivery, 'mcp_resource_link');
+    assert.equal(payload.result.structuredContent.delivery, 'direct_authenticated_http');
     assert.equal(Object.hasOwn(payload.result.structuredContent, 'requested_pages'), false);
     assert.equal(
       payload.result.content.some((item) => item.type === 'resource'),
       false,
     );
-    assert.ok(payload.result.content.some((item) => item.type === 'resource_link'));
-  } finally {
-    upstreamMode = 'ok';
-  }
-});
-test('large original is reconstructable through authenticated MCP chunks and resources', async () => {
-  upstreamMode = 'chunk-large';
-  try {
-    let offset = 0;
-    for (let index = 0; index < 7; index++) {
-      const payload = await (
-        await rpc(
-          'read_file_chunk',
-          {
-            course_id: 'c',
-            file_id: 'material:m:r',
-            offset,
-          },
-          { Authorization: 'Bearer ' + accessToken },
-        )
-      ).json();
-      assert.equal(payload.result.isError, undefined);
-      const value = payload.result.structuredContent;
-      const resource = payload.result.content.find((c) => c.type === 'resource').resource;
-      const bytes = Uint8Array.from(atob(resource.blob), (c) => c.charCodeAt(0));
-      assert.equal(bytes.length, index === 6 ? 17 : 1024 * 1024);
-      for (let i = 0; i < bytes.length; i++) assert.equal(bytes[i], (offset + i) % 251);
-      assert.equal(value.eof, index === 6);
-      offset = value.next_offset;
-      if (index === 6) {
-        const body = {
-          jsonrpc: '2.0',
-          id: 5,
-          method: 'resources/read',
-          params: { uri: resource.uri },
-        };
-        assert.equal(
-          (await post('/mcp', body, { Accept: 'application/json, text/event-stream' })).status,
-          401,
-        );
-        const result = await (
-          await post('/mcp', body, {
-            Accept: 'application/json, text/event-stream',
-            Authorization: 'Bearer ' + accessToken,
-          })
-        ).json();
-        assert.equal(result.error, undefined, JSON.stringify(result));
-        assert.equal(result.result.contents[0].blob, resource.blob);
-      }
-    }
-    assert.equal(offset, 6 * 1024 * 1024 + 17);
-    for (const args of [{ offset }, { offset: -1 }, { length: 1024 * 1024 + 1 }]) {
-      const payload = await (
-        await rpc(
-          'read_file_chunk',
-          {
-            course_id: 'c',
-            file_id: 'material:m:r',
-            ...args,
-          },
-          { Authorization: 'Bearer ' + accessToken },
-        )
-      ).json();
-      assert.equal(payload.result?.isError ?? !!payload.error, true);
-    }
+    assert.equal(
+      payload.result.content.some((item) => item.type === 'resource_link'),
+      false,
+    );
+    assert.ok(JSON.stringify(payload).length < 8192);
   } finally {
     upstreamMode = 'ok';
   }

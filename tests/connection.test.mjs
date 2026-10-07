@@ -32,7 +32,7 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
   const initialization = await init.json();
   assert.equal(initialization.result.protocolVersion, '2025-03-26');
   assert.equal(initialization.result.serverInfo.version, '1.0.0');
-  assert.ok(initialization.result.instructions.includes('初回に生成されたChatGPTファイルを再利用'));
+  assert.ok(initialization.result.instructions.includes('取得済み原本を再利用'));
   const notification = await handle(
     rpc({ jsonrpc: '2.0', method: 'notifications/initialized' }),
     env,
@@ -40,10 +40,10 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 17);
+  assert.equal(list.result.tools.length, 16);
   const readFile = list.result.tools.find((tool) => tool.name === 'read_file');
   assert.deepEqual(Object.keys(readFile.inputSchema.properties).sort(), ['course_id', 'file_id']);
-  assert.ok(readFile.description.includes('read_file_chunk'));
+  assert.ok(readFile.description.includes('prepare_request'));
   for (const tool of list.result.tools) {
     assert.equal(tool.inputSchema.type, 'object');
     assert.deepEqual(tool.securitySchemes, [
