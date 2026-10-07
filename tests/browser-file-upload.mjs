@@ -60,7 +60,7 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
         if(m.method==='ui/initialize') {
           window.initializations.push(m.params);
           reply({protocolVersion:m.params.protocolVersion,hostInfo:{name:'browser-fixture',version:'1'},
-            hostCapabilities:{serverTools:{},message:{text:{}},updateModelContext:{text:{},resourceLink:{}}},
+            hostCapabilities:{serverTools:{},message:{text:{},resourceLink:{}},updateModelContext:{text:{},resourceLink:{}}},
             hostContext:{displayMode:'inline',availableDisplayModes:['inline'],theme:'light'}});
         } else if(m.method==='ui/notifications/initialized') {
           e.source.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:${JSON.stringify(result)}},e.origin);
@@ -86,7 +86,7 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
       const iframe = document.querySelector('iframe');
       return !!iframe?.contentWindow?.uploads?.length;
     });
-    await page.waitForFunction(() => window.contexts.length === 1 && window.messages.length === 1);
+    await page.waitForFunction(() => window.messages.length === 1);
     const ui = page.frames().find((f) => f.url().endsWith('/widget'));
     const uploads = await ui.evaluate(() => window.uploads);
     assert.deepEqual(uploads, [
@@ -105,15 +105,17 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
       await page.evaluate(() => window.initializations[0].appCapabilities.availableDisplayModes),
       ['inline'],
     );
-    const context = await page.evaluate(() => window.contexts[0]);
-    const link = context.content.find((x) => x.type === 'resource_link');
+    assert.equal(await page.evaluate(() => window.contexts.length), 0);
+    const message = await page.evaluate(() => window.messages[0]);
+    const link = message.content.find((x) => x.type === 'resource_link');
     assert.equal(link.uri, 'https://files.oaiusercontent.test/file-browser-fixture');
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
-    assert.ok((await page.evaluate(() => window.messages[0].content[0].text)).includes('2ページ目'));
+    assert.ok(message.content[0].text.includes('2ページ目'));
     const state = await ui.evaluate(() => window.savedStates.at(-1));
     assert.equal(state.modelContent.model_readability, 'verification_requested');
     assert.equal(state.modelContent.model_context_linked, true);
+    assert.equal(state.modelContent.delivery_mode, 'ui_message_resource_link');
     assert.ok(!JSON.stringify(state).includes('ticket='));
     assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
     assert.equal(await frame.locator('#upload').isHidden(), true);
