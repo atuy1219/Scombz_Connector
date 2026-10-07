@@ -105,9 +105,20 @@ before(async () => {
           headers: { Location: 'https://evil.example/steal' },
         });
       const path = new URL(request.url).pathname;
+      if (path === '/lms/timetable')
+        return new Response(
+          page(
+            '<input id="displayMode1" checked><div class="div-table-data-row"><span class="div-table-colomn-period">２時限</span><div class="3-yobicol"><div><button class="timetable-course-top-btn" id="c">データ構造</button></div></div></div>',
+          ),
+        );
       if (path === '/lms/course') return new Response(course);
       if (path === '/lms/course/make/tempfile') return new Response('temporary-id');
       if (path.startsWith('/lms/course/material/setfiledown/')) {
+        if (upstreamMode === 'chunk-large') {
+          const bytes = new Uint8Array(6 * 1024 * 1024 + 17);
+          for (let i = 0; i < bytes.length; i++) bytes[i] = i % 251;
+          return new Response(bytes, { headers: { 'Content-Type': 'application/pdf' } });
+        }
         if (upstreamMode === 'embedded-large')
           return new Response('%PDF-1.7 fixture', {
             headers: {
@@ -533,7 +544,7 @@ test('read_file embeds normal PDFs and keeps a temporary scoped link fallback', 
   assert.equal(value.delivery, 'mcp_embedded_resource');
   const embedded = payload.result.content.find((x) => x.type === 'resource');
   assert.ok(embedded);
-  assert.equal(embedded.resource.uri, 'scombz://material/first.pdf');
+  assert.equal(embedded.resource.uri, 'scombz://files/c/material%3Am%3Ar');
   assert.equal(embedded.resource.mimeType, 'application/pdf');
   assert.equal(atob(embedded.resource.blob), '%PDF-1.7 fixture');
   const resourceLink = payload.result.content.find((x) => x.type === 'resource_link');
@@ -599,6 +610,99 @@ test('legacy page arguments are ignored and oversized embedded PDFs return a who
     upstreamMode = 'ok';
   }
 });
+test('large original is reconstructable through authenticated MCP chunks and resources', async () => {
+  upstreamMode = 'chunk-large';
+  try {
+    let offset = 0;
+    for (let index = 0; index < 7; index++) {
+      const payload = await (
+        await rpc(
+          'read_file_chunk',
+          {
+            course_id: 'c',
+            file_id: 'material:m:r',
+            offset,
+          },
+          { Authorization: 'Bearer ' + accessToken },
+        )
+      ).json();
+      assert.equal(payload.result.isError, undefined);
+      const value = payload.result.structuredContent;
+      const resource = payload.result.content.find((c) => c.type === 'resource').resource;
+      const bytes = Uint8Array.from(atob(resource.blob), (c) => c.charCodeAt(0));
+      assert.equal(bytes.length, index === 6 ? 17 : 1024 * 1024);
+      for (let i = 0; i < bytes.length; i++) assert.equal(bytes[i], (offset + i) % 251);
+      assert.equal(value.eof, index === 6);
+      offset = value.next_offset;
+      if (index === 6) {
+        const body = {
+          jsonrpc: '2.0',
+          id: 5,
+          method: 'resources/read',
+          params: { uri: resource.uri },
+        };
+        assert.equal(
+          (await post('/mcp', body, { Accept: 'application/json, text/event-stream' })).status,
+          401,
+        );
+        const result = await (
+          await post('/mcp', body, {
+            Accept: 'application/json, text/event-stream',
+            Authorization: 'Bearer ' + accessToken,
+          })
+        ).json();
+        assert.equal(result.error, undefined, JSON.stringify(result));
+        assert.equal(result.result.contents[0].blob, resource.blob);
+      }
+    }
+    assert.equal(offset, 6 * 1024 * 1024 + 17);
+    for (const args of [{ offset }, { offset: -1 }, { length: 1024 * 1024 + 1 }]) {
+      const payload = await (
+        await rpc(
+          'read_file_chunk',
+          {
+            course_id: 'c',
+            file_id: 'material:m:r',
+            ...args,
+          },
+          { Authorization: 'Bearer ' + accessToken },
+        )
+      ).json();
+      assert.equal(payload.result?.isError ?? !!payload.error, true);
+    }
+  } finally {
+    upstreamMode = 'ok';
+  }
+});
+test('current class context resolves JST timetable and returns public materials', async () => {
+  const result = await (
+    await rpc(
+      'get_current_class_context',
+      {
+        at: '2026-10-07T11:00:00+09:00',
+      },
+      { Authorization: 'Bearer ' + accessToken },
+    )
+  ).json();
+  const value = result.result.structuredContent;
+  assert.equal(value.status, 'matched');
+  assert.equal(value.course.course_id, 'c');
+  assert.equal(value.materials[0].file_id, 'material:m:r');
+  assert.equal(Object.hasOwn(value.materials[0], 'object_name'), false);
+  assert.deepEqual(value.assignments, []);
+  assert.equal(value.year, 2026);
+  const empty = await (
+    await rpc(
+      'get_current_class_context',
+      {
+        at: '2026-10-07T12:45:00+09:00',
+      },
+      { Authorization: 'Bearer ' + accessToken },
+    )
+  ).json();
+  assert.equal(empty.result.structuredContent.status, 'no_class');
+});
+
 test('refresh rotation cannot be replayed; tokens reject wrong audience and expiry', async () => {
   const data = {
     grant_type: 'refresh_token',

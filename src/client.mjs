@@ -282,7 +282,7 @@ export class ScombClient {
   async saveSession() {
     if (this.store && this.session) await this.store.save(this.session);
   }
-  async request(path, binary = false, allowRefresh = true) {
+  async request(path, binary = false, allowRefresh = true, range = null) {
     const u = validateReadUrl(path, binary);
     let session = await this.loadSession();
     const now = Date.now() / 1000;
@@ -295,7 +295,7 @@ export class ScombClient {
     if (!cookies.some((c) => c.name === 'SESSION')) {
       if (allowRefresh) {
         session = await this.refreshSession();
-        return this.request(path, binary, false);
+        return this.request(path, binary, false, range);
       }
       throw new ScombError(
         'web_session_unavailable',
@@ -312,6 +312,7 @@ export class ScombClient {
           'User-Agent': 'Mozilla/5.0',
           'Accept-Language': 'ja,en;q=0.8',
           Accept: binary ? '*/*' : 'text/html,application/xhtml+xml',
+          ...(range ? { Range: `bytes=${range.offset}-${range.offset + range.length - 1}` } : {}),
           Cookie: cookies.map((c) => `${c.name}=${c.value}`).join('; '),
         },
       });
@@ -327,7 +328,7 @@ export class ScombClient {
       if (target.pathname === '/login' || target.hostname !== HOST) {
         if (allowRefresh) {
           await this.refreshSession();
-          return this.request(path, binary, false);
+          return this.request(path, binary, false, range);
         }
         throw new ScombError(
           'web_session_unavailable',
@@ -342,7 +343,7 @@ export class ScombClient {
     if (response.status === 401) {
       if (allowRefresh) {
         await this.refreshSession();
-        return this.request(path, binary, false);
+        return this.request(path, binary, false, range);
       }
       throw new ScombError(
         'web_session_unavailable',
@@ -535,7 +536,7 @@ export class ScombClient {
   async materialInfo(courseId, fileId) {
     return publicFile(await this.materialRecord(courseId, fileId));
   }
-  async openMaterialFile(courseId, fileId) {
+  async openMaterialFile(courseId, fileId, range = null) {
     const file = await this.materialRecord(courseId, fileId);
     let download;
     if (file.kind === 'material') {
@@ -579,7 +580,7 @@ export class ScombClient {
         '?' +
         query;
     }
-    const response = await this.request(download, true);
+    const response = await this.request(download, true, true, range);
     const mime = response.headers.get('content-type') ?? 'application/octet-stream';
     if (mime.includes('text/html')) {
       const bytes = await readBounded(response, 1024 * 1024);
@@ -600,6 +601,104 @@ export class ScombClient {
     const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);
     const bytes = await readBounded(response, maximum);
     return { metadata, mime, bytes };
+  }
+  async materialChunk(courseId, fileId, offset = 0, length = 1024 * 1024) {
+    if (
+      !Number.isSafeInteger(offset) ||
+      offset < 0 ||
+      offset >= MAX_FILE_BYTES ||
+      !Number.isSafeInteger(length) ||
+      length < 1 ||
+      length > 1024 * 1024
+    )
+      throw new ScombError('invalid_range', '分割取得の範囲が不正です。');
+    const opened = await this.openMaterialFile(courseId, fileId, { offset, length });
+    if (opened.response.status === 206) {
+      const match = opened.response.headers
+        .get('content-range')
+        ?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+      const [start, end, total] = match ? match.slice(1).map(Number) : [];
+      if (
+        !match ||
+        start !== offset ||
+        end < start ||
+        end >= total ||
+        end >= offset + length ||
+        !Number.isSafeInteger(total) ||
+        total > MAX_FILE_BYTES
+      ) {
+        await opened.response.body?.cancel();
+        throw new ScombError('invalid_range', 'ScombZの部分応答の範囲を確認できません。');
+      }
+      const bytes = await readBounded(opened.response, length);
+      if (bytes.length !== end - start + 1)
+        throw new ScombError('invalid_range', '部分応答の長さが一致しません。');
+      return {
+        metadata: opened.metadata,
+        mime: opened.mime,
+        bytes,
+        offset,
+        next_offset: offset + bytes.length,
+        total_bytes: total,
+        eof: end + 1 === total,
+      };
+    }
+    const bounded = boundedBody(opened.response, MAX_FILE_BYTES);
+    const file = { ...opened, ...bounded };
+    const reader = file.body?.getReader();
+    if (!reader) {
+      if (offset > 0) throw new ScombError('invalid_range', 'ファイルの末尾を超えています。');
+      return {
+        metadata: file.metadata,
+        mime: file.mime,
+        bytes: new Uint8Array(),
+        offset: 0,
+        next_offset: 0,
+        total_bytes: 0,
+        eof: true,
+      };
+    }
+    const chunks = [];
+    let position = 0,
+      size = 0,
+      eof = false;
+    try {
+      while (position <= offset + length) {
+        const { done, value } = await reader.read();
+        if (done) {
+          eof = true;
+          break;
+        }
+        const start = Math.max(0, offset - position);
+        const end = Math.min(value.length, offset + length - position);
+        if (end > start) {
+          chunks.push(value.slice(start, end));
+          size += end - start;
+        }
+        position += value.length;
+        if (position > offset + length) break;
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    if (offset > position || (offset === position && offset > 0))
+      throw new ScombError('invalid_range', 'ファイルの末尾を超えています。');
+    const bytes = new Uint8Array(size);
+    let cursor = 0;
+    for (const chunk of chunks) {
+      bytes.set(chunk, cursor);
+      cursor += chunk.length;
+    }
+    const total = file.bytes ?? (eof ? position : null);
+    return {
+      metadata: file.metadata,
+      mime: file.mime,
+      bytes,
+      offset,
+      next_offset: offset + size,
+      total_bytes: total,
+      eof: total !== null ? offset + size >= total : eof,
+    };
   }
   async materialStream(courseId, fileId) {
     const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);

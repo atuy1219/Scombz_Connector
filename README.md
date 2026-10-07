@@ -56,7 +56,12 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `get_quiz` | 受験前の要項・公開済み結果 |
 | `list_surveys` / `get_survey` | アンケート一覧・設問・公開済み回答 |
 | `list_announcements` | お知らせ一覧 |
-| `read_file` | PDF全体を1回取得／教材・課題添付の取得 |
+| `read_file` | 小さいPDFを直接返却／原本リンク・分割取得案内 |
+| `read_file_chunk` | 最大1MiBずつ原本を取得（5MiB超も対応） |
+| `get_current_course` | 現在の授業候補 |
+| `get_current_course_materials` | 現在の授業の公開教材一覧 |
+| `get_current_course_tasks` | 現在の授業の課題・小テスト・アンケート一覧 |
+| `get_current_class_context` | 現在の授業と教材・タスクを一括取得 |
 
 課題提出、受験開始、再受験、回答送信、一時保存、出席送信は提供しません。ScombZへの通信は許可した経路へのGETのみで、リダイレクトも自動追跡しません。非公開・公開期間外の資料、要項に掲載されない未受験問題は取得できません。
 
@@ -66,9 +71,32 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 `read_file` は「PDF全体を1回取得するツール」です。引数は `course_id` と `file_id` のみで、`start_page`・`end_page`・`max_chars` は公開しません。PDF結果に `requested_pages` は含めません。同一PDFについて `read_file` を繰り返し呼ばず、初回に生成されたChatGPTファイルを再利用します。続きや特定ページはChatGPT側のFilesで、必要に応じて複数回読み取ります。
 
-原本ダウンロードは**100MiBまで**です。5MiB以下のPDFは原本全体をMCP埋め込みリソースで返し、それを超えるPDFとその他のバイナリは**MCP `resource_link`**と10分間有効な署名付きHTTPS URLからストリーミング取得します。テキスト形式は最大8MiBまでWorker内で読み込み、本文を最大40000文字まで返します。それを超えるファイルは原本リンクのみ返します。`read_file` は原本をConnectorへ永続保存しません。
+原本ダウンロードは**100MiBまで**です。3MiB以下のPDFは原本全体をMCP埋め込みリソースで返し、それを超えるPDFとその他のバイナリは**MCP `resource_link`**と10分間有効な署名付きHTTPS URLからストリーミング取得します。テキスト形式は最大8MiBまでWorker内で読み込み、本文を最大40000文字まで返します。大きなファイルは原本リンクまたは分割取得を使用します。`read_file` は原本をConnectorへ永続保存しません。
 
 リンクは特定の科目・ファイル・Workerだけに使えます。有効期間内にリンクを知る人は原本を取得できるため、公開しないでください。リンクが期限切れでも取得済みのChatGPTファイルを再利用します。原本取得に失敗しChatGPTファイルが生成されていない場合だけ `read_file` を再実行します。管理画面の「接続を解除」はOAuthトークンを無効にしますが、すでに発行した資料リンクは最大10分残ります。「セッションを削除」すると資料リンクでの取得も停止します。
+
+### 5MiB超の原本と実体化確認
+
+base64は原本の約1.33倍になるため、埋め込みは3MiBまでに抑え、tool resultを小さく保ちます。リンクを取り込めないホストでは `read_file_chunk(course_id, file_id, offset, length)` を使用できます。`length` は1〜1048576、`offset` は0始まりです。返却された埋め込みresourceの `blob` をbase64デコードして連結し、`next_offset` を次のoffsetとして `eof: true` まで取得します。これはバイト分割でありPDFページ分割ではありません。途中で原本が変更される可能性がある場合は最初から取得してください。原本を時点固定するキャッシュはありません。
+
+MCP `resources/templates/list` には次のリソースも登録しています。`resources/read` は通常の `scombz:read` OAuth認証が必要です。公開URLやSESSION受け渡しを使わず、同じMCP接続で読み取れます。
+
+- `scombz://files/{course_id}/{file_id}` — 3MiB以下の原本。file_idはURLエンコード。
+- `scombz://files/{course_id}/{file_id}/chunks/{offset}/{length}` — 最大1MiBの分割原本。
+
+ScombZへHTTP Rangeを要求し、対応する場合は必要な範囲のみ取得します。対応しない場合はストリームを読み飛ばして範囲末尾で中断します。この場合、後半の分割取得ほど上流通信量が増えるため、HTTPS原本リンクでの一括取得を優先してください。追加のR2設定や教材の永続保存は不要です。
+
+全読み取りツールに `readOnlyHint: true` / `openWorldHint: false` を指定し、Connector自身は資料取得時の追加承認を要求しません。ただしChatGPT側の実体化・接続・ツール承認ポリシーをサーバーから変更することはできません。埋め込みresourceや認証済みMCP分割取得によって外部URLの取り込みを回避できますが、ホストが必ず確認なしに処理する保証はありません。ChatGPT上での実体化UXはデプロイ・接続更新後の実機確認が必要です。
+
+### 現在の授業
+
+「今の授業の資料を取って要約して」には `get_current_class_context()` を使い、結果の `materials` から必要なファイルを `read_file` で読み取ります。教材原本をまとめて取得するツールではありません。
+
+4つの現在授業ツールは `at`（タイムゾーン付きISO日時、省略時は現在）、`year`、`semester`、`margin_minutes`（0〜30、省略時0）を受け取ります。日本時間の曜日と大学公式の時限（9:00–10:40、10:50–12:30、13:20–15:00、15:10–16:50、17:00–18:40、18:50–20:30）から本人のScombZ時間割を照合します。実際の授業時間帯を優先し、それ以外のときだけ前後の余裕時間を使います。
+
+結果は `matched` / `ambiguous` / `no_class`。候補が複数なら `course: null` と `matches` を返し、自動選択しません。オンデマンドなど曜日・時限を特定できない科目は除外します。休講・祝日・補講・授業期間外は未確認で、週次時間割に基づく候補として返します。教材一覧から該当回・最新回を勝手に断定しません。
+
+時限の出典: https://www.shibaura-it.ac.jp/campus_life/class/schedule.html
 
 ## Skill（任意）
 
