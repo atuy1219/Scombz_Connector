@@ -16,8 +16,11 @@ const status = (text) => {
   el('status').textContent = text;
 };
 const supported = () => typeof window.openai?.uploadFile === 'function';
-const canResolveUploadedFile = () =>
-  typeof window.openai?.getFileDownloadUrl === 'function';
+const canSendFollowUp = () => typeof window.openai?.sendFollowUpMessage === 'function';
+const filesSourceFileId = (fileId) =>
+  typeof fileId === 'string' && fileId.startsWith('sediment://')
+    ? fileId.slice('sediment://'.length)
+    : fileId;
 
 function receive(value) {
   if (!value?.structuredContent?.file || !value?._meta?.file_transfer) return;
@@ -120,93 +123,51 @@ async function downloadFile() {
 }
 
 async function linkUploadedFile() {
-  if (!uploaded || !connected || uploaded.model_context_linked) return;
-  if (!canResolveUploadedFile()) {
-    el('verify').hidden = false;
+  if (!uploaded || uploaded.followup_sent) return;
+
+  uploaded.library_handoff = 'model_file_id';
+  uploaded.handoff_ready = true;
+  try {
+    window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+  } catch {}
+
+  const verificationText =
+    `教材「${uploaded.filename}」のPDF原本をChatGPTへアップロードしました。` +
+    `Files用の元ファイルIDは ${uploaded.files_source_file_id} です。` +
+    'ChatGPTのFiles機能で、この元ファイルIDをsource_file_ref.file_idとして' +
+    `/ScombZ/${uploaded.filename} に保存し、その保存後のファイルを読んでください。` +
+    'resource_linkやファイル名だけで読めたとは扱わず、まず2ページ目の内容をページ番号付きで確認してください。';
+
+  if (!canSendFollowUp()) {
     status(
-      'アップロード完了。ただし、このホストではPDFをモデルへ渡すための一時URLを取得できません。',
+      'アップロード完了。PDFは読み取り準備済みです。次のメッセージで自動的にライブラリ保存・読取できます。',
     );
     return;
   }
 
-  let downloadUrl;
   try {
-    const resolved = await window.openai.getFileDownloadUrl({ fileId: uploaded.file_id });
-    downloadUrl = resolved?.downloadUrl;
-    const parsed = new URL(downloadUrl);
-    if (parsed.protocol !== 'https:') throw new Error('invalid_download_url');
-  } catch {
-    el('verify').hidden = false;
-    status('アップロード完了。ただし、PDFのモデル向け参照URLを取得できませんでした。');
-    return;
-  }
-
-  const resourceLink = {
-    type: 'resource_link',
-    uri: downloadUrl,
-    name: uploaded.filename,
-    mimeType: uploaded.mime_type,
-  };
-  const verificationText =
-    `教材「${uploaded.filename}」のPDF原本をChatGPTへアップロードしました。` +
-    `アップロード済みfileIdは ${uploaded.file_id} です。` +
-    'このfileIdのファイルが会話添付として直接読めない場合は、ChatGPTのFiles機能で' +
-    'このアップロード済みファイルをファイルライブラリへ保存してから本文を読んでください。' +
-    '保存時は可能ならsource_file_ref.file_idにこのfileIdを使い、/ScombZ/配下へ保存してください。' +
-    'resource_linkやファイル名だけで読めたとは扱わず、まず2ページ目の内容をページ番号付きで確認してください。';
-
-  try {
-    // Prefer attaching the uploaded PDF directly to the follow-up turn. In ChatGPT,
-    // ui/message resource links are model-visible file attachments on supported hosts.
-    const sent = await app.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: verificationText }, resourceLink],
+    await window.openai.sendFollowUpMessage({
+      prompt: verificationText,
+      scrollToBottom: true,
     });
-    if (sent?.isError) throw new Error('message_resource_link_rejected');
-    uploaded.model_context_linked = true;
     uploaded.followup_sent = true;
-    uploaded.delivery_mode = 'ui_message_resource_link';
-    uploaded.library_handoff = 'model_file_id';
-  } catch {
+    uploaded.model_readability = 'verification_requested';
+    uploaded.delivery_mode = 'chatgpt_follow_up_file_id';
     try {
-      // Fallback for hosts that accept resource links in model context but not ui/message.
-      await app.updateModelContext({
-        content: [
-          {
-            type: 'text',
-            text:
-              `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
-          },
-          resourceLink,
-        ],
-      });
-      const sent = await app.sendMessage({
-        role: 'user',
-        content: [{ type: 'text', text: verificationText }],
-      });
-      if (sent?.isError) throw new Error('message_rejected');
-      uploaded.model_context_linked = true;
-      uploaded.followup_sent = true;
-      uploaded.delivery_mode = 'update_model_context_fallback';
-      uploaded.library_handoff = 'model_file_id';
-    } catch {
-      uploaded.model_context_linked = false;
-      uploaded.followup_sent = false;
-      uploaded.delivery_mode = 'failed';
-      el('verify').hidden = false;
-      status(
-        'アップロード完了。ただし、PDFをモデルへ渡せませんでした。確認ボタンで再試行できます。',
-      );
-      return;
-    }
+      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+    } catch {}
+    el('verify').hidden = true;
+    status('アップロード完了。PDFのライブラリ保存と読み取り確認をChatGPTへ依頼しました。');
+  } catch {
+    uploaded.followup_error = 'follow_up_unavailable';
+    try {
+      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
+    } catch {}
+    el('verify').hidden = false;
+    status(
+      'アップロード完了。PDFは読み取り準備済みです。次のメッセージでライブラリ保存・読取できます。',
+    );
   }
-
-  uploaded.model_readability = 'verification_requested';
-  try {
-    window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-  } catch {}
-  el('verify').hidden = true;
-  status('アップロード完了。PDFを会話へ添付し、読み取り確認を開始しました。');
 }
 
 async function startUpload() {
@@ -225,6 +186,7 @@ async function startUpload() {
     if (typeof value?.fileId !== 'string' || !value.fileId) throw new Error('upload_failed');
     uploaded = {
       file_id: value.fileId,
+      files_source_file_id: filesSourceFileId(value.fileId),
       filename: file.name,
       mime_type: file.type,
       bytes: file.size,
@@ -242,11 +204,7 @@ async function startUpload() {
       window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
     } catch {}
     cachedFile = null;
-    if (connected) await linkUploadedFile();
-    else {
-      status('アップロード完了。モデルコンテキストへの受け渡しを待っています…');
-      el('verify').hidden = false;
-    }
+    await linkUploadedFile();
   } catch (error) {
     const messages = {
       expired: '取得リンクの期限が切れました。リンクを更新してください。',
@@ -333,7 +291,7 @@ app
   .connect()
   .then(() => {
     connected = true;
-    if (uploaded) void linkUploadedFile();
+    if (uploaded && !uploaded.followup_sent) void linkUploadedFile();
     else void maybeAutoUpload();
   })
   .catch(() => {
