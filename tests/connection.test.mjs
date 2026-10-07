@@ -40,7 +40,7 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 16);
+  assert.equal(list.result.tools.length, 17);
   const readFile = list.result.tools.find((tool) => tool.name === 'read_file');
   assert.deepEqual(Object.keys(readFile.inputSchema.properties).sort(), ['course_id', 'file_id']);
   assert.ok(readFile.description.includes('prepare_request'));

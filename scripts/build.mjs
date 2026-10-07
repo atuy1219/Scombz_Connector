@@ -1,4 +1,6 @@
 import { build } from 'esbuild';
+import { buildWidget } from './widget-build.mjs';
+await buildWidget();
 await build({
   entryPoints: ['src/worker.mjs'],
   outfile: 'dist/worker.mjs',
