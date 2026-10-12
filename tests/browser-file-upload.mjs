@@ -123,7 +123,9 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     assert.ok(message.content[0].text.includes('file-browser-fixture') === false);
     assert.ok(message.content[0].text.includes('source_file_ref') === false);
     const state = await ui.evaluate(() => window.savedStates.at(-1));
-    assert.equal(state.modelContent.library_saved, true);
+    assert.equal(state.modelContent.library_save_requested, true);
+    assert.equal(state.modelContent.library_status, 'unverified');
+    assert.equal(state.modelContent.handoff_status, 'linked');
     assert.equal(state.modelContent.model_readability, 'verification_requested');
     assert.equal(state.modelContent.model_context_linked, true);
     assert.equal(state.modelContent.delivery_mode, 'ui_message_resource_link');
