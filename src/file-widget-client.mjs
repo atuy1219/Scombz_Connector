@@ -11,17 +11,44 @@ let result,
   uploaded,
   busy = false,
   connected = false,
-  cachedFile;
+  cachedFile,
+  linkingPromise,
+  closingPromise,
+  widgetClosed = false;
 const status = (text) => {
   el('status').textContent = text;
 };
 const supported = () => typeof window.openai?.uploadFile === 'function';
 const canResolveUploadedFile = () => typeof window.openai?.getFileDownloadUrl === 'function';
 const canCloseWidget = () => typeof window.openai?.requestClose === 'function';
+// Closing on upload alone can discard the only recovery UI when the model handoff fails.
 async function closeCompletedWidget() {
-  if (!uploaded || uploaded.upload_status !== 'completed' || !canCloseWidget()) return;
+  if (
+    !uploaded ||
+    uploaded.upload_status !== 'completed' ||
+    !uploaded.model_context_linked ||
+    !uploaded.followup_sent ||
+    widgetClosed ||
+    !canCloseWidget()
+  ) return;
+  if (closingPromise) return closingPromise;
+  closingPromise = (async () => {
+    try {
+      await window.openai.requestClose();
+      widgetClosed = true;
+    } catch {
+      // A host may not support closing; the uploaded file is still usable.
+    } finally {
+      closingPromise = null;
+    }
+  })();
+  return closingPromise;
+}
+
+function persistUploadedState() {
+  if (!uploaded) return;
   try {
-    await window.openai.requestClose();
+    window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
   } catch {}
 }
 
@@ -57,6 +84,7 @@ function receive(value) {
   ) {
     uploaded = null;
     cachedFile = null;
+    widgetClosed = false;
   }
   result = next;
   transfer = nextTransfer;
@@ -85,11 +113,7 @@ function receive(value) {
     void maybeAutoUpload();
   } else {
     status('アップロード完了。PDF本文を読めるかは未確認です。');
-    if (connected)
-      void linkUploadedFile().finally(() => {
-        void closeCompletedWidget();
-      });
-    else void closeCompletedWidget();
+    if (connected) void linkUploadedFile();
   }
 }
 
@@ -160,19 +184,35 @@ async function sendFileIdFallback() {
     if (sent?.isError) return;
     uploaded.file_id_fallback_sent = true;
     uploaded.library_handoff = 'model_file_id';
-    try {
-      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-    } catch {}
+    uploaded.handoff_status = 'file_id_fallback';
+    persistUploadedState();
   } catch {}
 }
 
+// Multiple host notifications can arrive while the same attachment is being sent.
 async function linkUploadedFile() {
+  if (linkingPromise) return linkingPromise;
+  linkingPromise = performLinkUploadedFile();
+  try {
+    return await linkingPromise;
+  } finally {
+    linkingPromise = null;
+    await closeCompletedWidget();
+  }
+}
+
+async function performLinkUploadedFile() {
   if (!uploaded || !connected || uploaded.model_context_linked) return;
+  uploaded.handoff_attempts = (uploaded.handoff_attempts ?? 0) + 1;
+  uploaded.handoff_status = 'pending';
+  persistUploadedState();
   if (!canResolveUploadedFile()) {
     el('verify').hidden = false;
     status(
       'アップロード完了。ただし、このホストではPDFをモデルへ渡すための一時URLを取得できません。',
     );
+    uploaded.handoff_status = 'retry_required';
+    persistUploadedState();
     await sendFileIdFallback();
     return;
   }
@@ -186,6 +226,8 @@ async function linkUploadedFile() {
   } catch {
     el('verify').hidden = false;
     status('アップロード完了。ただし、PDFのモデル向け参照URLを取得できませんでした。');
+    uploaded.handoff_status = 'retry_required';
+    persistUploadedState();
     await sendFileIdFallback();
     return;
   }
@@ -212,6 +254,7 @@ async function linkUploadedFile() {
     uploaded.followup_sent = true;
     uploaded.delivery_mode = 'ui_message_resource_link';
     uploaded.library_handoff = 'resource_link';
+    uploaded.handoff_status = 'linked';
   } catch {
     try {
       // Fallback for hosts that accept resource links in model context but not ui/message.
@@ -233,10 +276,13 @@ async function linkUploadedFile() {
       uploaded.followup_sent = true;
       uploaded.delivery_mode = 'update_model_context_fallback';
       uploaded.library_handoff = 'resource_link';
+      uploaded.handoff_status = 'linked';
     } catch {
       uploaded.model_context_linked = false;
       uploaded.followup_sent = false;
       uploaded.delivery_mode = 'failed';
+      uploaded.handoff_status = 'retry_required';
+      persistUploadedState();
       el('verify').hidden = false;
       status(
         'アップロード完了。ただし、PDFをモデルへ渡せませんでした。確認ボタンで再試行できます。',
@@ -247,9 +293,7 @@ async function linkUploadedFile() {
   }
 
   uploaded.model_readability = 'verification_requested';
-  try {
-    window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-  } catch {}
+  persistUploadedState();
   el('verify').hidden = true;
   status('アップロード完了。PDFを会話へ添付し、読み取り確認を開始しました。');
 }
@@ -276,23 +320,24 @@ async function startUpload() {
       source_file_id: result.file.file_id,
       course_id: result.file.course_id,
       upload_status: 'completed',
-      library_saved: true,
+      library_save_requested: true,
+      library_status: 'unverified',
       model_readability: 'unverified',
+      handoff_status: 'pending',
+      handoff_attempts: 0,
       model_context_linked: false,
       followup_sent: false,
     };
     el('file-id').textContent = `ファイルID: ${value.fileId}`;
     el('file-id').hidden = false;
-    try {
-      window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-    } catch {}
+    persistUploadedState();
     cachedFile = null;
     if (connected) await linkUploadedFile();
     else {
       status('アップロード完了。モデルコンテキストへの受け渡しを待っています…');
       el('verify').hidden = false;
     }
-    await closeCompletedWidget();
+    // linkUploadedFile closes only when the host acknowledges the handoff.
   } catch (error) {
     const messages = {
       expired: '取得リンクの期限が切れました。リンクを更新してください。',
@@ -377,10 +422,7 @@ app
   .connect()
   .then(() => {
     connected = true;
-    if (uploaded)
-      void linkUploadedFile().finally(() => {
-        void closeCompletedWidget();
-      });
+    if (uploaded) void linkUploadedFile();
     else void maybeAutoUpload();
   })
   .catch(() => {
