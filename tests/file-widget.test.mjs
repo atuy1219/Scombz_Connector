@@ -27,6 +27,7 @@ const compiled = await build({
         async connect() {}
         async updateModelContext(value) {
           if (globalThis.rejectModelContext) throw new Error('context rejected');
+          if (globalThis.contextIsError) return { isError: true };
           globalThis.contexts.push(value);
         }
         async sendMessage(value) {
@@ -75,6 +76,9 @@ async function screen({
   rejectResourceMessages = false,
   rejectModelContext = false,
   resolveUploadedFile = true,
+  keepOpen = false,
+  timers = { setTimeout, clearTimeout },
+  contextIsError = false,
 } = {}) {
   const elements = new Map(
     [...FILE_WIDGET_HTML.matchAll(/id="([^"]+)"/g)].map(([, id]) => [
@@ -87,6 +91,7 @@ async function screen({
       },
     ]),
   );
+  elements.get('keep-open').checked = keepOpen;
   const calls = { uploads: [], fetches: [], states: [], downloadUrls: [], closes: 0 };
   const listeners = new Map();
   const openai = {
@@ -134,7 +139,10 @@ async function screen({
     toolCalls: [],
     rejectResourceMessages,
     rejectModelContext,
+    contextIsError,
     console,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
   });
   vm.runInContext(script, context);
   await Promise.resolve();
@@ -291,7 +299,7 @@ test('upload rejection exposes manual retry; restored uploads do not refetch ori
   assert.equal(s.elements.get('verify').hidden, true);
   assert.equal(s.elements.get('upload').hidden, false);
   assert.ok(s.elements.get('status').textContent.includes('失敗箇所: ChatGPTアップロード'));
-  assert.ok(s.elements.get('status').textContent.includes('例外: Error: host rejected'));
+  assert.ok(s.elements.get('status').textContent.includes('例外: Error: host_error'));
   await s.elements.get('upload').onclick();
   await settle(() => s.context.messages.length === 1);
   assert.equal(s.calls.fetches.length, 1);
@@ -330,4 +338,83 @@ test('repeated notifications do not reupload or redeliver a linked file', async 
   assert.equal(s.calls.uploads.length, 1);
   assert.equal(s.context.messages.length, 1);
   assert.equal(s.calls.closes, 1);
+});
+
+const report = (s) => JSON.parse(s.elements.get('diagnostic-log').value);
+test('diagnostics show failed stages and numeric RPC codes without exposing host secrets', async () => {
+  const s = await screen({
+    upload: async () => {
+      const error = new Error(
+        'permission denied https://private.test?ticket=secret SESSION=cookie Bearer token',
+      );
+      error.code = -32001;
+      throw error;
+    },
+  });
+  const log = report(s);
+  const failed = log.events.find((e) => e.stage === 'upload' && e.outcome === 'failed');
+  assert.equal(failed.error_code, 'permission_denied');
+  assert.equal(failed.rpc_code, -32001);
+  assert.equal(log.events.find((e) => e.stage === 'download_http').http_status, 200);
+  assert.equal(log.capabilities.uploadFile, true);
+  assert.equal(s.elements.get('diagnostics').open, true);
+  for (const secret of [
+    'private.test',
+    'secret',
+    'SESSION',
+    'Bearer',
+    'private-link',
+    'file-host-123',
+  ])
+    assert.ok(!JSON.stringify(log).includes(secret));
+});
+test('context isError is a failure, not a successful file handoff', async () => {
+  const s = await screen({ rejectResourceMessages: true, contextIsError: true });
+  assert.equal(s.calls.closes, 0);
+  assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, false);
+  assert.ok(
+    report(s).events.some(
+      (e) => e.stage === 'model_context' && e.error_code === 'context_rejected',
+    ),
+  );
+});
+test('debug mode keeps successful UI visible and logs both delivery paths', async () => {
+  const s = await screen({ keepOpen: true, rejectResourceMessages: true });
+  assert.equal(s.calls.closes, 0);
+  assert.equal(report(s).handoff_status, 'linked');
+  assert.ok(report(s).events.some((e) => e.stage === 'resource_message' && e.outcome === 'failed'));
+  assert.ok(
+    report(s).events.some((e) => e.stage === 'followup_message' && e.outcome === 'completed'),
+  );
+  assert.equal(report(s).model_readability, 'verification_requested');
+});
+test('slow upload is observable and does not trigger a second upload', async () => {
+  const pending = new Map();
+  let id = 0,
+    finish;
+  const timers = {
+    setTimeout(callback) {
+      pending.set(++id, callback);
+      return id;
+    },
+    clearTimeout(key) {
+      pending.delete(key);
+    },
+  };
+  const s = await screen({
+    timers,
+    upload: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  });
+  for (const callback of pending.values()) callback();
+  assert.ok(report(s).events.some((e) => e.stage === 'upload' && e.outcome === 'waiting'));
+  assert.equal(s.calls.uploads.length, 1);
+  await s.elements.get('upload').onclick();
+  assert.equal(s.calls.uploads.length, 1);
+  finish({ fileId: 'file-host-123' });
+  await settle(() => s.calls.closes === 1);
+  assert.equal(s.calls.closes, 1);
+  assert.equal(pending.size, 0);
 });

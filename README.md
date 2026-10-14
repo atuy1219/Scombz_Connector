@@ -232,3 +232,22 @@ SESSIONは本人としてWebへアクセスする認証情報で、読み取り�
 適用時は`0004_session_export_scope.sql`をD1に適用してからWorkerを更新します。`npm run deploy`はこの順序で実行します。
 
 書き込み機能は削除しました。更新時は `0005_remove_write_support.sql` を適用し、保存済みの提出下書きと旧書き込み権限を削除します。過去のマイグレーションは適用履歴の互換性のため保持します。SESSION受け渡しは取得・調査専用で、提出や受験開始には使用しません。
+
+### 教材Widgetの診断
+
+教材取得が進まない場合はWidgetの「診断情報」を開きます。「デバッグ用に成功後もこの画面を残す」を選ぶと、参照送信に成功しても自動終了しません。「診断ログをコピー」で結果を共有できます。クリップボードAPIが使えないホストではテキストを選択して手動でコピーします。
+
+ログにはホストAPIの有無、各処理の開始・成功・失敗、所要時間、取得時のHTTPステータス、分類済みエラーと数値RPCコードを記録します。15秒間応答がない処理は `waiting` と表示します。これは失敗やキャンセルではなく、重複アップロードを避けるため処理を継続します。直近80イベントを保持し、アップロード後はWidgetのprivate stateにも記録します。ログにはURL、ticket、SESSION、ファイルID、教材本文、任意の例外メッセージを含めません。
+
+| stage | 確認する箇所・次の対応 |
+| --- | --- |
+| `host_connect` / `tool_metadata` | ホスト接続・教材メタデータの到着。接続失敗なら教材を開き直す |
+| `download` / `download_http` | Worker経由の原本取得。401・expiredならリンク更新、413なら容量上限を確認 |
+| `upload` | ChatGPTのアップロードAPI。permission_deniedならホスト側の承認状態を確認 |
+| `resolve_file_url` | アップロード済みファイルの参照URL発行。unavailableならホストAPI未対応 |
+| `resource_message` | resource_link付き後続メッセージの受理。失敗時はmodel_context経路へ移る |
+| `model_context` / `followup_message` | 代替コンテキスト登録と後続通知。失敗時はPDF受け渡しを再試行 |
+| `file_id_fallback` | 参照送信失敗後のfileId通知 |
+| `widget_close` / `widget_state` / `refresh_link` | 画面終了・状態保存・取得リンク更新 |
+
+`linked` はホストAPIの受理だけを示します。ChatGPT内部のPDF取り込み、Library保存完了、モデルの本文読取、後続通知による回答再開はConnectorから観測できません。実ホストでは診断ログと、本文にある具体的な内容を読めたかを分けて確認してください。

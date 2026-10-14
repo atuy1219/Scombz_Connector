@@ -134,6 +134,19 @@ test('inline widget auto-uploads a PDF, links it into model context, and trigger
     assert.ok(!JSON.stringify(state).includes('files.oaiusercontent.test'));
     assert.equal(await frame.locator('#upload').isHidden(), true);
     assert.equal(await ui.evaluate(() => window.closeRequests), 1);
+    await frame.locator('#diagnostics').evaluate((node) => {
+      node.open = true;
+    });
+    const diagnostics = JSON.parse(await frame.locator('#diagnostic-log').inputValue());
+    assert.equal(diagnostics.handoff_status, 'linked');
+    assert.ok(
+      diagnostics.events.some(
+        (event) => event.stage === 'resource_message' && event.outcome === 'completed',
+      ),
+    );
+    assert.ok(!JSON.stringify(diagnostics).includes('file-browser-fixture'));
+    await frame.locator('#copy-diagnostics').click();
+    assert.ok((await frame.locator('#diagnostic-notice').textContent()).includes('コピー'));
   } finally {
     await browser.close();
   }

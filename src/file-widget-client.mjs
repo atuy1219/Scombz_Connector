@@ -15,6 +15,107 @@ let result,
   linkingPromise,
   closingPromise,
   widgetClosed = false;
+// Deliberately record fixed codes, never arbitrary host messages, URLs or file contents.
+const diagnosticEvents = [];
+const diagnosticStarted = Date.now();
+const waitingOperations = new Set();
+function capabilities() {
+  return Object.fromEntries(
+    ['uploadFile', 'getFileDownloadUrl', 'setWidgetState', 'requestClose'].map((name) => [
+      name,
+      typeof window.openai?.[name] === 'function',
+    ]),
+  );
+}
+function diagnosticSnapshot() {
+  return {
+    version: 1,
+    capabilities: capabilities(),
+    connected,
+    upload_status: uploaded?.upload_status ?? 'not_started',
+    handoff_status: uploaded?.handoff_status ?? 'not_started',
+    handoff_attempts: uploaded?.handoff_attempts ?? 0,
+    library_status: uploaded?.library_status ?? 'unverified',
+    model_readability: uploaded?.model_readability ?? 'unverified',
+    events: diagnosticEvents.slice(),
+  };
+}
+function diagnostic(stage, outcome, extra = {}) {
+  diagnosticEvents.push({ elapsed_ms: Date.now() - diagnosticStarted, stage, outcome, ...extra });
+  if (diagnosticEvents.length > 80) diagnosticEvents.shift();
+  el('diagnostic-log').value = JSON.stringify(diagnosticSnapshot(), null, 2);
+}
+function safeError(error) {
+  const known = new Set([
+    'expired',
+    'too_large',
+    'download_failed',
+    'invalid_metadata',
+    'empty',
+    'invalid_pdf',
+    'invalid_download_url',
+    'upload_failed',
+    'message_resource_link_rejected',
+    'message_rejected',
+    'context_rejected',
+    'refresh_failed',
+  ]);
+  const names = new Set([
+    'Error',
+    'TypeError',
+    'AbortError',
+    'TimeoutError',
+    'NotAllowedError',
+    'SecurityError',
+  ]);
+  const message = typeof error?.message === 'string' ? error.message : '';
+  const category = /permission|denied|not allowed|approval/i.test(message)
+    ? 'permission_denied'
+    : /unsupported|not supported|not implemented/i.test(message)
+      ? 'unsupported'
+      : /network|failed to fetch/i.test(message)
+        ? 'network_error'
+        : /timed? ?out|timeout/i.test(message)
+          ? 'timeout'
+          : 'host_error';
+  return {
+    ...(Number.isSafeInteger(error?.code) ? { rpc_code: error.code } : {}),
+    error_name: names.has(error?.name) ? error.name : 'HostError',
+    error_code: known.has(error?.message) ? error.message : category,
+  };
+}
+async function observe(stage, operation) {
+  const started = Date.now();
+  const operationId = {};
+  diagnostic(stage, 'started');
+  // This is a watchdog, not cancellation: never start a duplicate upload after a slow host call.
+  const watchdog = setTimeout(() => {
+    waitingOperations.add(operationId);
+    diagnostic(stage, 'waiting', { duration_ms: Date.now() - started });
+    el('diagnostics').open = true;
+    el('diagnostic-notice').textContent =
+      'ホストまたはネットワークの応答待ちです。処理は継続中です。診断ログで停止箇所を確認できます。';
+    persistUploadedState();
+  }, 15000);
+  try {
+    const value = await operation();
+    diagnostic(stage, 'completed', { duration_ms: Date.now() - started });
+    return value;
+  } catch (error) {
+    diagnostic(stage, 'failed', { duration_ms: Date.now() - started, ...safeError(error) });
+    el('diagnostics').open = true;
+    throw error;
+  } finally {
+    clearTimeout(watchdog);
+    waitingOperations.delete(operationId);
+    if (
+      !waitingOperations.size &&
+      el('diagnostic-notice').textContent.startsWith('ホストまたはネットワーク')
+    )
+      el('diagnostic-notice').textContent =
+        '応答待ちが終了しました。結果は診断ログで確認できます。';
+  }
+}
 const status = (text) => {
   el('status').textContent = text;
 };
@@ -29,12 +130,14 @@ async function closeCompletedWidget() {
     !uploaded.model_context_linked ||
     !uploaded.followup_sent ||
     widgetClosed ||
-    !canCloseWidget()
-  ) return;
+    !canCloseWidget() ||
+    el('keep-open').checked
+  )
+    return;
   if (closingPromise) return closingPromise;
   closingPromise = (async () => {
     try {
-      await window.openai.requestClose();
+      await observe('widget_close', () => window.openai.requestClose());
       widgetClosed = true;
     } catch {
       // A host may not support closing; the uploaded file is still usable.
@@ -47,13 +150,22 @@ async function closeCompletedWidget() {
 
 function persistUploadedState() {
   if (!uploaded) return;
+  el('diagnostic-log').value = JSON.stringify(diagnosticSnapshot(), null, 2);
   try {
-    window.openai?.setWidgetState?.({ modelContent: uploaded, privateContent: {} });
-  } catch {}
+    window.openai?.setWidgetState?.({
+      modelContent: uploaded,
+      privateContent: { diagnostics: diagnosticSnapshot() },
+    });
+  } catch (error) {
+    diagnostic('widget_state', 'failed', safeError(error));
+  }
 }
 
 function receive(value) {
-  if (!value?.structuredContent?.file || !value?._meta?.file_transfer) return;
+  if (!value?.structuredContent?.file || !value?._meta?.file_transfer) {
+    diagnostic('tool_metadata', 'waiting');
+    return;
+  }
   if (busy) return;
   const next = value.structuredContent;
   const nextTransfer = value._meta.file_transfer;
@@ -62,6 +174,7 @@ function receive(value) {
     url = new URL(nextTransfer.download_url);
   } catch {
     el('upload').disabled = true;
+    diagnostic('tool_metadata', 'failed', { error_code: 'invalid_metadata' });
     status('教材の取得リンクを確認できません。');
     return;
   }
@@ -75,6 +188,7 @@ function receive(value) {
     !Number.isFinite(Date.parse(nextTransfer.expires_at))
   ) {
     el('upload').disabled = true;
+    diagnostic('tool_metadata', 'failed', { error_code: 'invalid_metadata' });
     status('教材の取得リンクを確認できません。');
     return;
   }
@@ -86,6 +200,7 @@ function receive(value) {
     cachedFile = null;
     widgetClosed = false;
   }
+  diagnostic('tool_metadata', 'received');
   result = next;
   transfer = nextTransfer;
   const previous = window.openai?.widgetState?.modelContent;
@@ -105,6 +220,7 @@ function receive(value) {
   el('upload').hidden = true;
   el('verify').hidden = !uploaded;
   if (!uploaded) {
+    if (!supported()) diagnostic('upload_api', 'unavailable');
     status(
       supported()
         ? '教材を自動取得してChatGPTへアップロードします…'
@@ -126,6 +242,7 @@ async function downloadFile() {
     referrerPolicy: 'no-referrer',
     signal: AbortSignal.timeout(180000),
   });
+  diagnostic('download_http', 'received', { http_status: response.status });
   if (response.status === 401) throw new Error('expired');
   if (!response.ok) throw new Error(response.status === 413 ? 'too_large' : 'download_failed');
   // The server resolves the real name/type only when it streams the original.
@@ -170,23 +287,28 @@ async function downloadFile() {
 async function sendFileIdFallback() {
   if (!uploaded || !connected || uploaded.file_id_fallback_sent) return;
   try {
-    const sent = await app.sendMessage({
-      role: 'user',
-      content: [
-        {
-          type: 'text',
-          text:
-            `ScombZ教材「${uploaded.filename}」はアップロード済みですが、ファイル参照を渡せませんでした。` +
-            `fileId: ${uploaded.file_id}。Files/Library機能が利用できる場合は、このfileIdをsource_file_ref.file_idとして保存・読取を試し、本文を確認して元の依頼を続行してください。`,
-        },
-      ],
+    await observe('file_id_fallback', async () => {
+      const sent = await app.sendMessage({
+        role: 'user',
+        content: [
+          {
+            type: 'text',
+            text:
+              `ScombZ教材「${uploaded.filename}」はアップロード済みですが、ファイル参照を渡せませんでした。` +
+              `fileId: ${uploaded.file_id}。Files/Library機能が利用できる場合は、このfileIdをsource_file_ref.file_idとして保存・読取を試し、本文を確認して元の依頼を続行してください。`,
+          },
+        ],
+      });
+      if (sent?.isError) throw new Error('message_rejected');
     });
-    if (sent?.isError) return;
     uploaded.file_id_fallback_sent = true;
     uploaded.library_handoff = 'model_file_id';
     uploaded.handoff_status = 'file_id_fallback';
     persistUploadedState();
-  } catch {}
+  } catch (error) {
+    diagnostic('file_id_fallback', 'rejected', safeError(error));
+    persistUploadedState();
+  }
 }
 
 // Multiple host notifications can arrive while the same attachment is being sent.
@@ -207,6 +329,7 @@ async function performLinkUploadedFile() {
   uploaded.handoff_status = 'pending';
   persistUploadedState();
   if (!canResolveUploadedFile()) {
+    diagnostic('resolve_file_url', 'unavailable');
     el('verify').hidden = false;
     status(
       'アップロード完了。ただし、このホストではPDFをモデルへ渡すための一時URLを取得できません。',
@@ -219,7 +342,12 @@ async function performLinkUploadedFile() {
 
   let downloadUrl;
   try {
-    const resolved = await window.openai.getFileDownloadUrl({ fileId: uploaded.file_id });
+    const resolved = await observe('resolve_file_url', async () => {
+      const value = await window.openai.getFileDownloadUrl({ fileId: uploaded.file_id });
+      if (!value?.downloadUrl || new URL(value.downloadUrl).protocol !== 'https:')
+        throw new Error('invalid_download_url');
+      return value;
+    });
     downloadUrl = resolved?.downloadUrl;
     const parsed = new URL(downloadUrl);
     if (parsed.protocol !== 'https:') throw new Error('invalid_download_url');
@@ -245,11 +373,13 @@ async function performLinkUploadedFile() {
   try {
     // Prefer attaching the uploaded PDF directly to the follow-up turn. In ChatGPT,
     // ui/message resource links are model-visible file attachments on supported hosts.
-    const sent = await app.sendMessage({
-      role: 'user',
-      content: [{ type: 'text', text: verificationText }, resourceLink],
+    await observe('resource_message', async () => {
+      const sent = await app.sendMessage({
+        role: 'user',
+        content: [{ type: 'text', text: verificationText }, resourceLink],
+      });
+      if (sent?.isError) throw new Error('message_resource_link_rejected');
     });
-    if (sent?.isError) throw new Error('message_resource_link_rejected');
     uploaded.model_context_linked = true;
     uploaded.followup_sent = true;
     uploaded.delivery_mode = 'ui_message_resource_link';
@@ -258,20 +388,25 @@ async function performLinkUploadedFile() {
   } catch {
     try {
       // Fallback for hosts that accept resource links in model context but not ui/message.
-      await app.updateModelContext({
-        content: [
-          {
-            type: 'text',
-            text: `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
-          },
-          resourceLink,
-        ],
+      await observe('model_context', async () => {
+        const contextResult = await app.updateModelContext({
+          content: [
+            {
+              type: 'text',
+              text: `ScombZ教材「${uploaded.filename}」をChatGPTへアップロード済みです。PDF原本の本文を実際に読んで利用してください。`,
+            },
+            resourceLink,
+          ],
+        });
+        if (contextResult?.isError) throw new Error('context_rejected');
       });
-      const sent = await app.sendMessage({
-        role: 'user',
-        content: [{ type: 'text', text: verificationText }],
+      await observe('followup_message', async () => {
+        const sent = await app.sendMessage({
+          role: 'user',
+          content: [{ type: 'text', text: verificationText }],
+        });
+        if (sent?.isError) throw new Error('message_rejected');
       });
-      if (sent?.isError) throw new Error('message_rejected');
       uploaded.model_context_linked = true;
       uploaded.followup_sent = true;
       uploaded.delivery_mode = 'update_model_context_fallback';
@@ -305,13 +440,16 @@ async function startUpload() {
   el('upload').hidden = true;
   let phase = 'download';
   try {
-    const file = await downloadFile();
+    const file = await observe('download', downloadFile);
     phase = 'upload';
     status(
       `原本取得成功: ${(file.size / 1048576).toFixed(2)} MiB\nChatGPTへ自動アップロードし、ファイルライブラリへ保存中…`,
     );
-    const value = await window.openai.uploadFile(file, { library: true });
-    if (typeof value?.fileId !== 'string' || !value.fileId) throw new Error('upload_failed');
+    const value = await observe('upload', async () => {
+      const value = await window.openai.uploadFile(file, { library: true });
+      if (typeof value?.fileId !== 'string' || !value.fileId) throw new Error('upload_failed');
+      return value;
+    });
     uploaded = {
       file_id: value.fileId,
       filename: file.name,
@@ -350,12 +488,8 @@ async function startUpload() {
       download: '原本取得',
       upload: 'ChatGPTアップロード',
     };
-    const rawDetail =
-      error instanceof Error ? `${error.name}: ${error.message || '(messageなし)'}` : String(error);
-    const detail = rawDetail
-      .replace(/https?:\/\/\S+/g, '[URL]')
-      .replace(/ticket=[^\\s&]+/gi, 'ticket=[REDACTED]')
-      .slice(0, 500);
+    const safe = safeError(error);
+    const detail = `${safe.error_name}: ${safe.error_code}`;
     const known = messages[error?.message];
     status(
       `失敗箇所: ${phaseLabels[phase] ?? phase}\n` +
@@ -383,11 +517,14 @@ el('refresh').onclick = async () => {
   if (busy || !connected || !result) return;
   el('refresh').disabled = true;
   try {
-    const next = await app.callServerTool({
-      name: 'open_file_in_chat',
-      arguments: { course_id: result.file.course_id, file_id: result.file.file_id },
+    const next = await observe('refresh_link', async () => {
+      const next = await app.callServerTool({
+        name: 'open_file_in_chat',
+        arguments: { course_id: result.file.course_id, file_id: result.file.file_id },
+      });
+      if (next.isError) throw new Error('refresh_failed');
+      return next;
     });
-    if (next.isError) throw new Error('refresh_failed');
     receive(next);
   } catch {
     status('リンクを更新できませんでした。教材をもう一度開いてください。');
@@ -418,13 +555,26 @@ window.addEventListener('openai:set_globals', (event) => {
 });
 const metadata = window.openai?.toolResponseMetadata;
 receive(metadata?.call_tool_result ?? metadata?.mcp_tool_result);
-app
-  .connect()
+observe('host_connect', () => app.connect())
   .then(() => {
     connected = true;
     if (uploaded) void linkUploadedFile();
     else void maybeAutoUpload();
   })
   .catch(() => {
-    if (!result) status('教材情報を受け取れませんでした。教材をもう一度開いてください。');
+    status('ChatGPTホストに接続できませんでした。診断ログを確認し、教材をもう一度開いてください。');
   });
+
+el('copy-diagnostics').onclick = async () => {
+  const report = JSON.stringify(diagnosticSnapshot(), null, 2);
+  el('diagnostic-log').value = report;
+  try {
+    await navigator.clipboard.writeText(report);
+    el('diagnostic-notice').textContent = '診断ログをコピーしました。';
+  } catch {
+    el('diagnostic-log').focus();
+    el('diagnostic-log').select();
+    el('diagnostic-notice').textContent =
+      '自動コピーが許可されていません。選択された診断ログを手動でコピーしてください。';
+  }
+};
