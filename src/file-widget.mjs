@@ -14,5 +14,11 @@ h1{font-size:17px;overflow-wrap:anywhere;margin:0 0 8px}p{font-size:14px;line-he
 <button id="refresh" hidden>取得リンクを更新</button>
 <a id="download" hidden rel="noreferrer noopener">原本をダウンロード</a></div>
 <p id="note">教材は自動取得・アップロードされ、モデルコンテキストへ受け渡されます。失敗時だけ再試行操作を表示します。</p>
-<p id="file-id" hidden></p><script>${browserScript.replaceAll('</script', '<\\/script')}</script></body></html>`;
-
+<p id="file-id" hidden></p>
+<details id="diagnostics"><summary>診断情報</summary>
+<p>各段階の結果を確認できます。送信成功後のPDF本文読取・保存完了・回答再開は、この画面からは確認できません。</p>
+<label><input type="checkbox" id="keep-open"> デバッグ用に成功後もこの画面を残す</label>
+<p id="diagnostic-notice" role="status"></p>
+<button id="copy-diagnostics">診断ログをコピー</button>
+<textarea id="diagnostic-log" readonly aria-label="診断ログ" rows="12" style="display:block;width:100%;box-sizing:border-box;margin-top:12px"></textarea>
+</details><script>${browserScript.replaceAll('</script', '<\\/script')}</script></body></html>`;

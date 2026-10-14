@@ -27,6 +27,7 @@ const compiled = await build({
         async connect() {}
         async updateModelContext(value) {
           if (globalThis.rejectModelContext) throw new Error('context rejected');
+          if (globalThis.contextIsError) return { isError: true };
           globalThis.contexts.push(value);
         }
         async sendMessage(value) {
@@ -74,6 +75,10 @@ async function screen({
   toolResult = response(),
   rejectResourceMessages = false,
   rejectModelContext = false,
+  resolveUploadedFile = true,
+  keepOpen = false,
+  timers = { setTimeout, clearTimeout },
+  contextIsError = false,
 } = {}) {
   const elements = new Map(
     [...FILE_WIDGET_HTML.matchAll(/id="([^"]+)"/g)].map(([, id]) => [
@@ -86,6 +91,7 @@ async function screen({
       },
     ]),
   );
+  elements.get('keep-open').checked = keepOpen;
   const calls = { uploads: [], fetches: [], states: [], downloadUrls: [], closes: 0 };
   const listeners = new Map();
   const openai = {
@@ -110,6 +116,7 @@ async function screen({
         }
       : {}),
   };
+  if (!resolveUploadedFile) delete openai.getFileDownloadUrl;
   const context = vm.createContext({
     URL,
     Blob,
@@ -132,7 +139,10 @@ async function screen({
     toolCalls: [],
     rejectResourceMessages,
     rejectModelContext,
+    contextIsError,
     console,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
   });
   vm.runInContext(script, context);
   await Promise.resolve();
@@ -172,7 +182,10 @@ test('whole 7.19 and 50 MiB PDFs auto-upload and are linked into model context',
     assert.equal(link.name, '講義.pdf');
     assert.equal(link.mimeType, 'application/pdf');
     assert.equal(link.uri, 'https://files.oaiusercontent.test/file-host-123');
-    assert.equal(s.calls.states.at(-1).modelContent.library_saved, true);
+    assert.equal(s.calls.states.at(-1).modelContent.library_save_requested, true);
+    assert.equal(s.calls.states.at(-1).modelContent.library_status, 'unverified');
+    assert.equal(s.calls.states.at(-1).modelContent.handoff_status, 'linked');
+    assert.equal(s.calls.states.at(-1).modelContent.handoff_attempts, 1);
     assert.equal(s.calls.states.at(-1).modelContent.model_readability, 'verification_requested');
     assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, true);
     assert.equal(s.calls.states.at(-1).modelContent.delivery_mode, 'ui_message_resource_link');
@@ -224,7 +237,20 @@ test('fileId instructions are sent only after both resource link paths fail', as
   assert.ok(s.context.messages[0].content[0].text.includes('source_file_ref.file_id'));
   assert.ok(!s.context.messages[0].content[0].text.includes('2ページ目'));
   assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, false);
+  assert.equal(s.calls.states.at(-1).modelContent.handoff_status, 'file_id_fallback');
+  assert.equal(s.elements.get('verify').hidden, false);
+  assert.equal(s.calls.closes, 0, 'failed handoff must not auto-close');
   assert.equal(s.calls.uploads.length, 1);
+
+  // The host can recover without downloading or re-uploading the same PDF.
+  s.context.rejectResourceMessages = false;
+  s.context.rejectModelContext = false;
+  await s.elements.get('verify').onclick();
+  await settle(() => s.calls.closes === 1);
+  assert.equal(s.calls.fetches.length, 1);
+  assert.equal(s.calls.uploads.length, 1);
+  assert.equal(s.calls.states.at(-1).modelContent.handoff_status, 'linked');
+  assert.equal(s.calls.states.at(-1).modelContent.handoff_attempts, 2);
 });
 
 test('empty, HTML, over-limit and failed downloads never reach uploadFile and expose retry', async () => {
@@ -273,7 +299,7 @@ test('upload rejection exposes manual retry; restored uploads do not refetch ori
   assert.equal(s.elements.get('verify').hidden, true);
   assert.equal(s.elements.get('upload').hidden, false);
   assert.ok(s.elements.get('status').textContent.includes('失敗箇所: ChatGPTアップロード'));
-  assert.ok(s.elements.get('status').textContent.includes('例外: Error: host rejected'));
+  assert.ok(s.elements.get('status').textContent.includes('例外: Error: host_error'));
   await s.elements.get('upload').onclick();
   await settle(() => s.context.messages.length === 1);
   assert.equal(s.calls.fetches.length, 1);
@@ -288,4 +314,107 @@ test('upload rejection exposes manual retry; restored uploads do not refetch ori
   assert.equal(missing.calls.fetches.length, 0);
   assert.equal(missing.elements.get('download').hidden, false);
   assert.ok(missing.elements.get('status').textContent.includes('会話に添付'));
+});
+
+test('unavailable host file URL keeps the widget open for recovery', async () => {
+  const s = await screen({ resolveUploadedFile: false });
+  assert.equal(s.calls.uploads.length, 1);
+  assert.equal(s.calls.fetches.length, 1);
+  assert.equal(s.calls.closes, 0);
+  assert.equal(s.elements.get('verify').hidden, false);
+  assert.equal(s.context.messages.length, 1);
+  const state = s.calls.states.at(-1).modelContent;
+  assert.equal(state.model_context_linked, false);
+  assert.equal(state.handoff_status, 'file_id_fallback');
+  assert.equal(state.library_status, 'unverified');
+});
+
+test('repeated notifications do not reupload or redeliver a linked file', async () => {
+  const s = await screen();
+  assert.equal(s.calls.closes, 1);
+  s.context.bridge.ontoolresult(response());
+  await settle(() => s.calls.states.at(-1).modelContent.model_context_linked);
+  assert.equal(s.calls.fetches.length, 1);
+  assert.equal(s.calls.uploads.length, 1);
+  assert.equal(s.context.messages.length, 1);
+  assert.equal(s.calls.closes, 1);
+});
+
+const report = (s) => JSON.parse(s.elements.get('diagnostic-log').value);
+test('diagnostics show failed stages and numeric RPC codes without exposing host secrets', async () => {
+  const s = await screen({
+    upload: async () => {
+      const error = new Error(
+        'permission denied https://private.test?ticket=secret SESSION=cookie Bearer token',
+      );
+      error.code = -32001;
+      throw error;
+    },
+  });
+  const log = report(s);
+  const failed = log.events.find((e) => e.stage === 'upload' && e.outcome === 'failed');
+  assert.equal(failed.error_code, 'permission_denied');
+  assert.equal(failed.rpc_code, -32001);
+  assert.equal(log.events.find((e) => e.stage === 'download_http').http_status, 200);
+  assert.equal(log.capabilities.uploadFile, true);
+  assert.equal(s.elements.get('diagnostics').open, true);
+  for (const secret of [
+    'private.test',
+    'secret',
+    'SESSION',
+    'Bearer',
+    'private-link',
+    'file-host-123',
+  ])
+    assert.ok(!JSON.stringify(log).includes(secret));
+});
+test('context isError is a failure, not a successful file handoff', async () => {
+  const s = await screen({ rejectResourceMessages: true, contextIsError: true });
+  assert.equal(s.calls.closes, 0);
+  assert.equal(s.calls.states.at(-1).modelContent.model_context_linked, false);
+  assert.ok(
+    report(s).events.some(
+      (e) => e.stage === 'model_context' && e.error_code === 'context_rejected',
+    ),
+  );
+});
+test('debug mode keeps successful UI visible and logs both delivery paths', async () => {
+  const s = await screen({ keepOpen: true, rejectResourceMessages: true });
+  assert.equal(s.calls.closes, 0);
+  assert.equal(report(s).handoff_status, 'linked');
+  assert.ok(report(s).events.some((e) => e.stage === 'resource_message' && e.outcome === 'failed'));
+  assert.ok(
+    report(s).events.some((e) => e.stage === 'followup_message' && e.outcome === 'completed'),
+  );
+  assert.equal(report(s).model_readability, 'verification_requested');
+});
+test('slow upload is observable and does not trigger a second upload', async () => {
+  const pending = new Map();
+  let id = 0,
+    finish;
+  const timers = {
+    setTimeout(callback) {
+      pending.set(++id, callback);
+      return id;
+    },
+    clearTimeout(key) {
+      pending.delete(key);
+    },
+  };
+  const s = await screen({
+    timers,
+    upload: () =>
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+  });
+  for (const callback of pending.values()) callback();
+  assert.ok(report(s).events.some((e) => e.stage === 'upload' && e.outcome === 'waiting'));
+  assert.equal(s.calls.uploads.length, 1);
+  await s.elements.get('upload').onclick();
+  assert.equal(s.calls.uploads.length, 1);
+  finish({ fileId: 'file-host-123' });
+  await settle(() => s.calls.closes === 1);
+  assert.equal(s.calls.closes, 1);
+  assert.equal(pending.size, 0);
 });

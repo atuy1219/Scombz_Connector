@@ -119,12 +119,12 @@ Cookieは実行環境のメモリ内だけで使用し、通常の返信・ロ�
 `open_file_in_chat(course_id, file_id)` は、ChatGPTで教材原本を読むときの**標準経路**です。Chat / Workを問わず、Widgetと `uploadFile` が利用でき、少数教材の取得で目的を達成できる場合はこの経路を優先します。Widgetは表示後に自動で、Workerが保存済みSESSIONを使って一時IDを発行し、原本をストリーミング取得して `window.openai.uploadFile(File)` へ渡します。通常時にアップロードボタン操作は不要です。アップロード後は `window.openai.getFileDownloadUrl({ fileId })` でChatGPT側の一時URLを取得し、MCP Appsの `ui/message` に `resource_link` を直接含めて本文確認ターンを自動送信します。`ui/message` がresource linkを受け付けないホストでは `ui/update-model-context` へ渡してからテキストメッセージを送るフォールバックを使います。SESSIONはWidget・モデルへ渡しません。PDF本体はMCP応答を通らないため、MCPの埋め込み転送上限を避けます。`read_file` + `get_web_session` の直接HTTP取得は、大量処理・追加調査・Widget非対応時の高度な経路として残しています。
 
 - 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
-- ChatGPTへのアップロードが完了したら `window.openai.requestClose()` でWidgetを自動的に閉じます。取得・アップロードに失敗した場合だけWidgetを残し、再試行や原本ダウンロードを表示します。
+- ChatGPTへのアップロードと `resource_link` を添付した後続メッセージの送信が両方成功した場合だけ、`window.openai.requestClose()` でWidgetを自動的に閉じます。ファイル参照の引き渡しに失敗した場合はWidgetを残し、原本の再取得や再アップロードなしに参照送信を再試行できます。`ui/message` の受理はモデル側でのPDF読取成功を保証しません。
 - ファイルID・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズ・ファイル名・MIME型は原本未取得時点では不明（`null`）です。
 - `open_file_in_chat` はIDの構文検証と署名ticketの発行だけを行い、ScombZ教材ページを取得しません。教材情報はWidgetの `/files` アクセス時に一度解決し、実際のファイル名・MIME型をレスポンスヘッダーから受け取ります。準備時の `file.filename` と `mime_type` は `null` です。このツールのtext応答は短い要約とし、構造化データとのJSON重複を避けます。他ツールのtext応答は既存の互換性を維持します。
-- 自動アップロードは `library: true` を指定します。ただし実機では、Widgetから保存した直後のファイルがモデル側のFiles/Library検索へ即時に現れない場合があります。正常時の確認用メッセージは教材名と元の依頼を続行する指示だけにします。ファイル参照の受け渡しに失敗した場合のみ、`uploadFile` が返した `fileId` とFiles/Libraryによる保存・読取のフォールバック案内を送ります。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
+- 自動アップロードは `library: true` を指定しますが、これは保存要求です。Widgetの状態には `library_save_requested: true` / `library_status: unverified` と記録し、モデル側のFiles/Library検索・読取が確認されるまで「保存完了」と断定しません。正常時の確認用メッセージは教材名と元の依頼を続行する指示だけにします。ファイル参照の受け渡しに失敗した場合のみ、`uploadFile` が返した `fileId` とFiles/Libraryによる保存・読取のフォールバック案内を送ります。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
 - アップロード完了はPDF本文のモデル読取成功と同義ではありません。ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、本文を実際に確認してから元の依頼を続行するように促します。特定ページの確認は指定しません。ファイル参照の受け渡しに失敗した場合だけfileIdをモデル可視テキストへ渡し、ホストがFiles/Library操作を提供していれば、そのfileIdを元ファイル参照としてライブラリへ保存してから読み取るフォールバックを使います。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetから会話へ添付するAPIとしては扱いません。
-- **PoCの未確認部分:** 自動（ユーザー操作なし）の `uploadFile` が全ChatGPTホストで許可されるか、モデル側Files/LibraryがWidgetの `fileId` を元ファイル参照として受け入れるか、`resource_link` を含む `ui/message` が新規アップロードPDFを通常の会話添付として安定してモデルへ渡せるか、ホスト固有のアップロード容量上限。失敗時だけWidgetに再試行ボタンを表示します。7.19 MiBのPDFで実ページの読取を確認してから、約50 MiBのPDFでも試してください。
+- **PoCの未確認部分:** 自動（ユーザー操作なし）の `uploadFile` が全ChatGPTホストで許可されるか、モデル側Files/LibraryがWidgetの `fileId` を元ファイル参照として受け入れるか、`resource_link` を含む `ui/message` が新規アップロードPDFを通常の会話添付として安定してモデルへ渡せるか、ホスト固有のアップロード容量上限。Widgetの `handoff_status: linked` は送信APIの受理を意味し、本文確認済みではありません。後続の `ui/message` が回答生成後に届くこともあり、同一ターンでの自動再開は保証されません。ChatGPT実機で7.19 MiBのPDFのページ内容まで確認してから、約50 MiBのPDFも試してください。
 
 WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは署名付き `/files/` のGET/OPTIONSだけで、ブラウザが送るOriginをその応答に限って反映します。ChatGPT Web/Android/iOSなどホストごとのsandbox originを固定列挙しません。管理画面・OAuth・MCPへの別originアクセスは許可しません。CORSは認証の代わりではなく、期限・科目・ファイルに結びついた署名ticketを必ず検証し、ブラウザ経由ではadmin keyやOAuth bearerをticketの代用にできません。opaqueな `Origin: null` は許可しません。
 
@@ -232,3 +232,22 @@ SESSIONは本人としてWebへアクセスする認証情報で、読み取り�
 適用時は`0004_session_export_scope.sql`をD1に適用してからWorkerを更新します。`npm run deploy`はこの順序で実行します。
 
 書き込み機能は削除しました。更新時は `0005_remove_write_support.sql` を適用し、保存済みの提出下書きと旧書き込み権限を削除します。過去のマイグレーションは適用履歴の互換性のため保持します。SESSION受け渡しは取得・調査専用で、提出や受験開始には使用しません。
+
+### 教材Widgetの診断
+
+教材取得が進まない場合はWidgetの「診断情報」を開きます。「デバッグ用に成功後もこの画面を残す」を選ぶと、参照送信に成功しても自動終了しません。「診断ログをコピー」で結果を共有できます。クリップボードAPIが使えないホストではテキストを選択して手動でコピーします。
+
+ログにはホストAPIの有無、各処理の開始・成功・失敗、所要時間、取得時のHTTPステータス、分類済みエラーと数値RPCコードを記録します。15秒間応答がない処理は `waiting` と表示します。これは失敗やキャンセルではなく、重複アップロードを避けるため処理を継続します。直近80イベントを保持し、アップロード後はWidgetのprivate stateにも記録します。ログにはURL、ticket、SESSION、ファイルID、教材本文、任意の例外メッセージを含めません。
+
+| stage | 確認する箇所・次の対応 |
+| --- | --- |
+| `host_connect` / `tool_metadata` | ホスト接続・教材メタデータの到着。接続失敗なら教材を開き直す |
+| `download` / `download_http` | Worker経由の原本取得。401・expiredならリンク更新、413なら容量上限を確認 |
+| `upload` | ChatGPTのアップロードAPI。permission_deniedならホスト側の承認状態を確認 |
+| `resolve_file_url` | アップロード済みファイルの参照URL発行。unavailableならホストAPI未対応 |
+| `resource_message` | resource_link付き後続メッセージの受理。失敗時はmodel_context経路へ移る |
+| `model_context` / `followup_message` | 代替コンテキスト登録と後続通知。失敗時はPDF受け渡しを再試行 |
+| `file_id_fallback` | 参照送信失敗後のfileId通知 |
+| `widget_close` / `widget_state` / `refresh_link` | 画面終了・状態保存・取得リンク更新 |
+
+`linked` はホストAPIの受理だけを示します。ChatGPT内部のPDF取り込み、Library保存完了、モデルの本文読取、後続通知による回答再開はConnectorから観測できません。実ホストでは診断ログと、本文にある具体的な内容を読めたかを分けて確認してください。
