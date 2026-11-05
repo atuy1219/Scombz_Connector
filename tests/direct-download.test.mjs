@@ -58,3 +58,82 @@ test('assignment attachment uses a direct GET without a material temporary ID', 
     { code: 'parse_error' },
   );
 });
+
+const cookie = {
+  name: 'SESSION',
+  value: 'same-session',
+  domain: 'scombz.shibaura-it.ac.jp',
+  path: '/',
+  secure: true,
+  expires: -1,
+};
+const session = { cookies: [cookie] };
+const guardedFetch = async (url, options) => {
+  const headers = new Headers(options.headers);
+  assert.equal(headers.get('cookie'), 'SESSION=same-session');
+  assert.equal(options.redirect, 'manual');
+  if (headers.get('user-agent') !== 'Mozilla/5.0')
+    return new Response('<meta content="Scomb_news">', { status: 403 });
+  if (url.includes('/make/tempfile')) return new Response('new-id');
+  if (url.includes('/setfiledown/') || url.includes('/submission_download/'))
+    return new Response('%PDF-1.7 fixture');
+  return new Response('<div id="page_head"></div>');
+};
+test('exported headers prevent the valid-SESSION Python User-Agent 403 regression at every stage', async () => {
+  const client = new ScombClient({}, { session, fetch: guardedFetch });
+  const auth = await client.exportWebSession();
+  const html = 'https://scombz.shibaura-it.ac.jp/lms/course?idnumber=c';
+  assert.equal(
+    (
+      await guardedFetch(html, {
+        redirect: 'manual',
+        headers: { Cookie: 'SESSION=same-session', 'User-Agent': 'Python-urllib/3.12' },
+      })
+    ).status,
+    403,
+  );
+  assert.equal(
+    (
+      await guardedFetch(html, {
+        redirect: 'manual',
+        headers: { ...auth.request_headers, Cookie: 'SESSION=same-session' },
+      })
+    ).status,
+    200,
+  );
+  for (const record of [
+    material,
+    { ...material, kind: 'assignment_attachment', assignment_id: 'a', download_mode: '1' },
+  ]) {
+    const plan = await clientFor(record).materialDownloadPlan('c', record.file_id);
+    let temporary;
+    const get = (url, headers) =>
+      guardedFetch(url, {
+        redirect: 'manual',
+        headers: { ...headers, Cookie: 'SESSION=same-session' },
+      });
+    if (plan.prepare_request) {
+      const response = await get(plan.prepare_request.url, plan.prepare_request.headers);
+      assert.equal(response.status, 200);
+      temporary = await response.text();
+    }
+    const response = await get(
+      resolveMaterialDownloadUrl(plan, temporary),
+      plan.download_request.headers,
+    );
+    assert.equal(response.status, 200);
+    assert.ok((await response.text()).startsWith('%PDF-'));
+  }
+  assert.equal((await client.request(html)).status, 200);
+});
+test('403 with browser headers does not refresh or invalidate an otherwise held session', async () => {
+  const client = new ScombClient(
+    {},
+    { session, fetch: async () => new Response('Scomb_news', { status: 403 }) },
+  );
+  client.refreshSession = () => {
+    throw new Error('must not refresh based on 403');
+  };
+  await assert.rejects(client.request('/portal/home'), { code: 'upstream_forbidden' });
+  assert.equal((await client.exportWebSession()).cookie.value, 'same-session');
+});

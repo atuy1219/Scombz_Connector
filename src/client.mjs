@@ -1,3 +1,4 @@
+import { WEB_HEADERS, FILE_HEADERS, DIRECT_HTTP_DIAGNOSTICS } from './http-policy.mjs';
 import { SessionStore } from './storage.mjs';
 import { MobileAuthClient } from './mobile-auth.mjs';
 import { digest } from './crypto.mjs';
@@ -47,9 +48,6 @@ const SAFE_QUERY_KEYS = new Set([
   'page',
 ]);
 const HOST = new URL(BASE).hostname;
-
-export const MAX_FILE_BYTES = 100 * 1024 * 1024;
-export const MAX_INLINE_FILE_BYTES = 8 * 1024 * 1024;
 
 export { ScombError } from './errors.mjs';
 
@@ -155,50 +153,6 @@ async function readBounded(response, maximum) {
   return bytes;
 }
 
-function contentLength(response) {
-  const raw = response.headers.get('content-length');
-  if (!raw) return null;
-  const value = Number(raw);
-  return Number.isSafeInteger(value) && value >= 0 ? value : null;
-}
-
-function boundedBody(response, maximum) {
-  const declared = contentLength(response);
-  if (declared !== null && declared > maximum)
-    throw new ScombError('file_too_large', 'ファイルが取得上限を超えています。');
-  const reader = response.body?.getReader();
-  if (!reader) return { body: null, bytes: declared ?? 0 };
-  let size = 0;
-  return {
-    bytes: declared,
-    body: new ReadableStream({
-      async pull(controller) {
-        try {
-          const { done, value } = await reader.read();
-          if (done) {
-            controller.close();
-            return;
-          }
-          size += value.byteLength;
-          if (size > maximum) {
-            await reader.cancel().catch(() => {});
-            controller.error(
-              new ScombError('file_too_large', 'ファイルが取得上限を超えています。'),
-            );
-            return;
-          }
-          controller.enqueue(value);
-        } catch (error) {
-          controller.error(error);
-        }
-      },
-      cancel(reason) {
-        return reader.cancel(reason);
-      },
-    }),
-  };
-}
-
 export class ScombClient {
   constructor(env, options = {}) {
     this.env = env;
@@ -289,6 +243,9 @@ export class ScombClient {
         http_only: cookie.httpOnly,
         expires_at: cookie.expires < 0 ? null : new Date(cookie.expires * 1000).toISOString(),
       },
+      request_headers: WEB_HEADERS,
+      follow_redirects: false,
+      diagnostics: DIRECT_HTTP_DIAGNOSTICS,
       permissions: 'full_web_session_not_read_only',
       validity:
         'サーバー側の失効時刻は不明。直接アクセスで認証切れが確認された場合だけrefresh=trueで再取得してください。',
@@ -326,9 +283,7 @@ export class ScombClient {
         redirect: 'manual',
         signal: AbortSignal.timeout(binary ? 120000 : 25000),
         headers: {
-          'User-Agent': 'Mozilla/5.0',
-          'Accept-Language': 'ja,en;q=0.8',
-          Accept: binary ? '*/*' : 'text/html,application/xhtml+xml',
+          ...(binary ? FILE_HEADERS : WEB_HEADERS),
           Cookie: cookies.map((c) => `${c.name}=${c.value}`).join('; '),
         },
       });
@@ -366,6 +321,8 @@ export class ScombClient {
         'Webセッションを自動更新してもScombZへ接続できませんでした。時間をおいて接続を確認してください。',
       );
     }
+    if (response.status === 403)
+      throw new ScombError('upstream_forbidden', DIRECT_HTTP_DIAGNOSTICS.forbidden);
     if (!response.ok)
       throw new ScombError('upstream_error', `ScombZがHTTP ${response.status}を返しました。`);
     const setCookies = response.headers.getSetCookie?.() ?? [];
@@ -573,9 +530,14 @@ export class ScombClient {
       return {
         file: publicFile(file),
         origin: BASE,
-        prepare_request: { method: 'GET', url: BASE + '/lms/course/make/tempfile?' + prepare },
+        prepare_request: {
+          method: 'GET',
+          headers: FILE_HEADERS,
+          url: BASE + '/lms/course/make/tempfile?' + prepare,
+        },
         download_request: {
           method: 'GET',
+          headers: FILE_HEADERS,
           url_template:
             BASE +
             '/lms/course/material/setfiledown/' +
@@ -601,44 +563,9 @@ export class ScombClient {
       prepare_request: null,
       download_request: {
         method: 'GET',
+        headers: FILE_HEADERS,
         url: BASE + '/lms/course/report/submission_download/' + filename + '?' + query,
       },
     };
-  }
-  async openMaterialFile(courseId, fileId) {
-    const plan = await this.materialDownloadPlan(courseId, fileId);
-    const file = plan.file;
-    let download = plan.download_request.url;
-    if (plan.prepare_request) {
-      const response = await this.request(plan.prepare_request.url, true);
-      const temporary = new TextDecoder().decode(await readBounded(response, 4096));
-      download = resolveMaterialDownloadUrl(plan, temporary);
-    }
-    const response = await this.request(download, true);
-    const mime = response.headers.get('content-type') ?? 'application/octet-stream';
-    if (mime.includes('text/html')) {
-      const bytes = await readBounded(response, 1024 * 1024);
-      const state = pageState(new TextDecoder().decode(bytes));
-      if (state.login)
-        throw new ScombError(
-          'web_session_unavailable',
-          '教材ファイルを取得できませんでした。時間をおいて接続を確認してください。',
-        );
-      if (state.header)
-        throw new ScombError('unavailable', 'ファイルではなくScombZの案内画面が返りました。');
-      throw new ScombError('unavailable', 'ファイルではなくHTMLが返りました。');
-    }
-    await this.saveSession();
-    return { metadata: file, mime, response };
-  }
-  async materialFile(courseId, fileId, maximum = MAX_INLINE_FILE_BYTES) {
-    const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);
-    const bytes = await readBounded(response, maximum);
-    return { metadata, mime, bytes };
-  }
-  async materialStream(courseId, fileId) {
-    const { metadata, mime, response } = await this.openMaterialFile(courseId, fileId);
-    const { body, bytes } = boundedBody(response, MAX_FILE_BYTES);
-    return { metadata, mime, body, bytes };
   }
 }

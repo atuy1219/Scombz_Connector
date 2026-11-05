@@ -521,7 +521,7 @@ test('explicit session consent exports only SESSION without fetching or parsing 
     200,
   );
 });
-test('read_file returns a direct HTTP plan without loading file bytes and keeps a scoped proxy fallback', async () => {
+test('read_file returns a direct HTTP plan without loading file bytes', async () => {
   const beforeRead = upstream;
   const response = await rpc(
     'read_file',
@@ -535,8 +535,6 @@ test('read_file returns a direct HTTP plan without loading file bytes and keeps 
   assert.equal(value.text, null);
   assert.equal(Object.hasOwn(value, 'requested_pages'), false);
   assert.equal(value.bytes, null);
-  assert.equal(value.download_limit_bytes, 100 * 1024 * 1024);
-  assert.equal(value.download_limit_scope, 'connector_proxy_only');
   assert.equal(value.retention, 'not_stored_by_connector');
   assert.equal(value.delivery, 'direct_authenticated_http');
   assert.equal(
@@ -562,165 +560,34 @@ test('read_file returns a direct HTTP plan without loading file bytes and keeps 
     'read_file only retrieves material metadata, not a temp ID or original',
   );
   assert.ok(!JSON.stringify(payload).includes('private-fixture-cookie'));
-  assert.ok(value.download_url);
-  assert.ok(!value.download_url.includes('private-fixture-cookie'));
-
-  const url = new URL(value.download_url);
-  const beforeDownload = upstream;
-  const result = await req(url.pathname + url.search);
-  assert.equal(result.status, 200);
-  assert.equal(await result.text(), '%PDF-1.7 fixture');
-  assert.equal(result.headers.get('cache-control'), 'private, no-store');
-  assert.equal(
-    upstream,
-    beforeDownload + 3,
-    'download resolves metadata, tempfile and original once',
-  );
-
-  upstreamMode = 'large';
-  try {
-    const tooLarge = await req(url.pathname + url.search);
-    assert.equal(tooLarge.status, 413);
-    assert.equal((await tooLarge.json()).code, 'file_too_large');
-  } finally {
-    upstreamMode = 'ok';
-  }
-
-  assert.equal(
-    (await req(url.pathname + url.search.replace('material%3Am%3Ar', 'material%3Am%3As'))).status,
-    401,
-  );
+  assert.equal(Object.hasOwn(value, 'download_url'), false);
+  assert.equal(value.direct_download.prepare_request.headers['User-Agent'], 'Mozilla/5.0');
+  assert.equal(value.direct_download.download_request.headers['User-Agent'], 'Mozilla/5.0');
 });
-test('chat widget keeps scoped links private, serves its UI and authenticates before reading', async () => {
+test('removed proxy and widget cannot retrieve files even with a valid ticket', async () => {
   const before = upstream;
-  const payload = await (
+  const ticket = await sign(bindings, {
+    kind: 'file',
+    resource: origin + '/mcp',
+    course_id: 'c',
+    file_id: 'material:m:r',
+    exp: Math.floor(Date.now() / 1000) + 600,
+  });
+  for (const method of ['GET', 'OPTIONS'])
+    assert.equal(
+      (await req('/files/c?file_id=material:m:r&ticket=' + ticket, { method })).status,
+      404,
+    );
+  const removed = await (
     await rpc(
       'open_file_in_chat',
       { course_id: 'c', file_id: 'material:m:r' },
       { Authorization: 'Bearer ' + accessToken },
     )
   ).json();
-  assert.equal(payload.result.isError, undefined);
-  assert.equal(payload.result.structuredContent.delivery, 'chatgpt_widget_upload');
-  assert.equal(payload.result.structuredContent.upload_status, 'not_started');
-  assert.equal(payload.result.structuredContent.model_readability, 'unverified');
-  assert.equal(payload.result.structuredContent.size_bytes, null);
-  assert.equal(upstream, before, 'opening the Widget does not fetch ScombZ metadata');
-  assert.equal(payload.result.structuredContent.file.filename, null);
-  assert.equal(payload.result.structuredContent.mime_type, null);
-  assert.ok(!payload.result.content[0].text.includes('file_id'));
-  assert.ok(!payload.result.structuredContent._summary);
-  assert.ok(!JSON.stringify(payload.result.content).includes('ticket='));
-  assert.ok(!JSON.stringify(payload.result.structuredContent).includes('ticket='));
-  assert.ok(!JSON.stringify(payload).includes('private-fixture-cookie'));
-  const transfer = payload.result._meta.file_transfer;
-  assert.equal(transfer.max_bytes, 100 * 1024 * 1024);
-  const ui = await (
-    await post(
-      '/mcp',
-      {
-        jsonrpc: '2.0',
-        id: 3,
-        method: 'resources/read',
-        params: { uri: 'ui://scombz/file-upload-v1.html' },
-      },
-      { Accept: 'application/json, text/event-stream', Authorization: 'Bearer ' + accessToken },
-    )
-  ).json();
-  const resource = ui.result.contents[0];
-  assert.equal(resource.mimeType, 'text/html;profile=mcp-app');
-  assert.deepEqual(resource._meta.ui.csp.connectDomains, [origin]);
-  assert.ok(resource.text.includes('教材は自動取得・アップロードされ'));
-  assert.ok(resource.text.includes('model_readability'));
-  const beforeRead = upstream;
-  const unauthenticated = await post(
-    '/mcp',
-    {
-      jsonrpc: '2.0',
-      id: 3,
-      method: 'resources/read',
-      params: { uri: 'ui://scombz/file-upload-v1.html' },
-    },
-    { Accept: 'application/json, text/event-stream' },
-  );
-  assert.equal(unauthenticated.status, 401);
-  assert.equal(upstream, beforeRead);
+  assert.ok(removed.error || removed.result?.isError);
+  assert.equal(upstream, before);
 });
-
-test('ticketed file CORS follows the browser Origin without opening admin or MCP routes', async () => {
-  const payload = await (
-    await rpc(
-      'open_file_in_chat',
-      { course_id: 'c', file_id: 'material:m:r' },
-      { Authorization: 'Bearer ' + accessToken },
-    )
-  ).json();
-  const url = new URL(payload.result._meta.file_transfer.download_url);
-  const path = url.pathname + url.search;
-  const browserOrigins = [
-    'https://web-sandbox.oaiusercontent.com',
-    'https://chatgpt.com',
-    'https://future-sandbox.example',
-  ];
-  const before = upstream;
-  for (const browserOrigin of browserOrigins) {
-    const headers = { Origin: browserOrigin };
-    const preflight = await req(path, { method: 'OPTIONS', headers });
-    assert.equal(preflight.status, 204);
-    assert.equal(preflight.headers.get('access-control-allow-origin'), browserOrigin);
-    assert.equal(preflight.headers.get('access-control-allow-credentials'), null);
-
-    const body = await req(path, { headers });
-    assert.equal(body.status, 200);
-    assert.equal(body.headers.get('access-control-allow-origin'), browserOrigin);
-    assert.equal(body.headers.get('access-control-allow-credentials'), null);
-    assert.equal(body.headers.get('vary'), 'Origin');
-    assert.equal(await body.text(), '%PDF-1.7 fixture');
-  }
-  assert.equal(upstream, before + browserOrigins.length * 3);
-
-  const widgetOrigin = browserOrigins[0];
-  const headers = { Origin: widgetOrigin };
-  assert.equal(
-    (await req('/api/status', { headers: { ...adminHeaders, Origin: widgetOrigin } })).status,
-    403,
-  );
-  assert.equal(
-    (await post('/mcp', {}, { ...headers, Authorization: 'Bearer ' + accessToken })).status,
-    403,
-  );
-
-  const stripped = url.pathname + '?file_id=material%3Am%3Ar';
-  const beforeInvalid = upstream;
-  for (const browserOrigin of browserOrigins) {
-    for (const method of ['GET', 'OPTIONS']) {
-      const denied = await req(stripped, {
-        method,
-        headers: {
-          Origin: browserOrigin,
-          Authorization: 'Bearer ' + bindings.ADMIN_TOKEN,
-        },
-      });
-      assert.equal(denied.status, 401);
-      assert.equal(denied.headers.get('access-control-allow-origin'), browserOrigin);
-    }
-  }
-  assert.equal(upstream, beforeInvalid);
-
-  const opaque = await req(path, { headers: { Origin: 'null' } });
-  assert.equal(opaque.status, 403);
-  assert.equal(opaque.headers.get('access-control-allow-origin'), null);
-
-  upstreamMode = 'large';
-  try {
-    const tooLarge = await req(path, { headers });
-    assert.equal(tooLarge.status, 413);
-    assert.equal(tooLarge.headers.get('access-control-allow-origin'), widgetOrigin);
-  } finally {
-    upstreamMode = 'ok';
-  }
-});
-
 test('large PDFs return a small direct HTTP plan without embedding or downloading', async () => {
   upstreamMode = 'embedded-large';
   try {
@@ -816,26 +683,6 @@ test('refresh rotation cannot be replayed; tokens reject wrong audience and expi
     (await rpc('get_connection_status', {}, { Authorization: 'Bearer ' + accessToken })).status,
     401,
   );
-});
-test('file links reject expiry, changed identifiers and missing authentication without fetching', async () => {
-  const count = upstream;
-  for (const ticket of [
-    '',
-    await sign(bindings, {
-      kind: 'file',
-      course_id: 'c',
-      file_id: 'material:m:r',
-      exp: 1,
-    }),
-    await sign(bindings, {
-      kind: 'file',
-      course_id: 'different',
-      file_id: 'material:m:r',
-      exp: Date.now() / 1000 + 300,
-    }),
-  ])
-    assert.equal((await req('/files/c?file_id=material:m:r&ticket=' + ticket)).status, 401);
-  assert.equal(upstream, count);
 });
 test('oversized streamed RPC bodies fail before parsing or accessing ScombZ', async () => {
   assert.equal(

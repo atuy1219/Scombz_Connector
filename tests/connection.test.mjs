@@ -40,7 +40,17 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 17);
+  assert.equal(list.result.tools.length, 16);
+  assert.equal(
+    list.result.tools.some((tool) => tool.name === 'open_file_in_chat'),
+    false,
+  );
+  assert.ok(initialization.result.instructions.includes('Mozilla/5.0'));
+  const resources = await (
+    await handle(rpc({ jsonrpc: '2.0', id: 3, method: 'resources/list' }), env)
+  ).json();
+  assert.equal(resources.error.code, -32601);
+  assert.equal(initialization.result.capabilities.resources, undefined);
   const readFile = list.result.tools.find((tool) => tool.name === 'read_file');
   assert.deepEqual(Object.keys(readFile.inputSchema.properties).sort(), ['course_id', 'file_id']);
   assert.ok(readFile.description.includes('prepare_request'));
