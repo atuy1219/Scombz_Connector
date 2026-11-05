@@ -522,6 +522,39 @@ test('explicit session consent exports only SESSION without fetching or parsing 
     200,
   );
 });
+test('single-call download preparation requires session consent and returns a compact recipe', async () => {
+  const args = { course_id: 'c', file_id: 'material:m:r' };
+  const before = upstream;
+  assert.equal(
+    (await rpc('prepare_file_download', args, { Authorization: 'Bearer ' + accessToken })).status,
+    401,
+  );
+  assert.equal(upstream, before, 'scope is checked before accessing ScombZ');
+  const tokens = await (
+    await form('/oauth/token', await codeForClient({ scope: 'scombz:read scombz:session' }))
+  ).json();
+  const response = await rpc('prepare_file_download', args, {
+    Authorization: 'Bearer ' + tokens.access_token,
+  });
+  const payload = await response.json();
+  const value = payload.result.structuredContent;
+  assert.equal(value.protocol, 'scombz-direct-v1');
+  assert.equal(value.session, state.cookies[0].value);
+  assert.equal(value.headers['User-Agent'], USER_AGENT);
+  assert.ok(value.prepare.includes('/make/tempfile?'));
+  assert.ok(value.download.endsWith('fileId={temporary_file_id}'));
+  assert.equal(
+    upstream,
+    before + 1,
+    'only one metadata request, no preflight, temp ID or file fetch',
+  );
+  assert.equal(payload.result.content.length, 1);
+  assert.ok(
+    !payload.result.content[0].text.includes(value.session),
+    'no duplicate credential in text',
+  );
+  assert.ok(JSON.stringify(payload).length < 3000, 'compact recipe without repeated instructions');
+});
 test('read_file returns a direct HTTP plan without loading file bytes', async () => {
   const beforeRead = upstream;
   const response = await rpc(

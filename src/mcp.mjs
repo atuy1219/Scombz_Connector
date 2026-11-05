@@ -5,7 +5,7 @@ import { ScombClient, ScombError } from './client.mjs';
 import { publicFile } from './parsers.mjs';
 import { access, challenge } from './oauth.mjs';
 import { currentContext, termAt } from './current-class.mjs';
-import { DIRECT_HTTP_INSTRUCTIONS, DIRECT_HTTP_DIAGNOSTICS } from './http-policy.mjs';
+import { DIRECT_HTTP_INSTRUCTIONS, DIRECT_HTTP_DIAGNOSTICS, FILE_HEADERS } from './http-policy.mjs';
 
 const id = z
   .string()
@@ -260,6 +260,42 @@ export async function mcpResponse(request, env, options = {}) {
           'read_fileは取得手順だけを返します。原本を読み終えたことにはなりません。直接取得のサイズ上限は実行環境側で適用してください。',
         ],
       };
+    },
+  );
+  server.registerTool(
+    'prepare_file_download',
+    {
+      title: '教材の直接取得をまとめて準備',
+      description:
+        '教材の取得URL・共通ヘッダー・SESSIONを1回で返します。通常の原本取得はこのツールを優先し、付属scripts/download.pyへ構造化結果を標準入力で渡します。Cookieは保存・表示せずScombZだけに使用。原本本体は含まず、実行環境から直接取得します。',
+      inputSchema: { course_id: id, file_id: fileId, refresh: z.boolean().default(false) },
+      annotations: { ...readonly, idempotentHint: false },
+      _meta: { securitySchemes: [{ type: 'oauth2', scopes: ['scombz:session'] }] },
+    },
+    async (args) => {
+      if (!(await access(request, env, origin, 'scombz:session')))
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'SESSION受け渡しの権限でOAuth接続が必要です。' }],
+          _meta: { 'mcp/www_authenticate': [challenge(origin, 'scombz:session')] },
+        };
+      return wrap(async () => {
+        // Refresh first, then resolve metadata using that session; export any rotated cookie last.
+        if (args.refresh) await client.exportWebSession(true);
+        const plan = await client.materialDownloadPlan(args.course_id, args.file_id);
+        const auth = await client.exportWebSession();
+        return {
+          protocol: 'scombz-direct-v1',
+          file: plan.file,
+          origin: plan.origin,
+          headers: FILE_HEADERS,
+          session: auth.cookie.value,
+          prepare: plan.prepare_request?.url ?? null,
+          download: plan.download_request.url ?? plan.download_request.url_template,
+          _summary:
+            '直接取得の準備完了。構造化結果をdownload.pyの標準入力に渡してください。本文は未取得です。',
+        };
+      })(args);
     },
   );
   server.registerTool(

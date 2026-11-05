@@ -11,3 +11,5 @@ session.json
 *session*.json
 .private/
 *.log
+__pycache__/
+*.py[cod]

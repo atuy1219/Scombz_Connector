@@ -57,6 +57,7 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `list_surveys` / `get_survey` | アンケート一覧・設問・公開済み回答 |
 | `list_announcements` | お知らせ一覧 |
 | `get_web_session` | 直接取得用のSESSIONと必須HTTPヘッダー |
+| `prepare_file_download` | 通常の教材取得用。SESSIONと取得手順を1回で準備 |
 | `read_file` | 教材・課題添付の直接HTTP取得手順 |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
@@ -70,7 +71,15 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 ### 教材の直接取得
 
-教材原本の取得は、モード名・件数に関係なく`read_file` + `get_web_session`に統一しています。Widget・uploadFile・Connector中継URLは削除しました。既存クライアントもツール一覧を更新してください。
+通常は`prepare_file_download(course_id, file_id)`を1回呼び、返された構造化結果を`skills/scombz/scripts/download.py`の標準入力へ渡します。`python3 .../download.py output.pdf`の引数は出力先だけにし、SESSIONを含むJSONはプロセスの標準入力に直接渡してください。JSONをコマンド引数・保存ファイル・ログへ出さないでください。`scombz:session`のOAuth承認が必要です。
+
+準備ツールはメタデータだけを取得し、SESSIONと短いURL手順を一つの応答にまとめます。textとstructuredContentで同じデータを二重出力しません。ダウンロード・一時ID・空本文の1回再試行・PDF署名確認・容量制限はPython標準ライブラリの共通スクリプトで行い、原本をMCPへ流しません。既存ファイルは上書きしません。
+
+既知のID・SESSIONキャッシュ・取得済み原本を再利用し、接続確認・時間割取得・ログインを繰り返しません。複数原本は逐次取得し、403・429・503では連続再試行を止めます。`Retry-After`を尊重し、人工的な操作履歴やランダムな待ち時間は作りません。サイトのブロック回避は保証しません。
+
+共通スクリプトが使えない環境では、以下の個別ツールによる直接取得を使用できます。
+
+教材原本の取得は、モード名・件数に関係なく直接HTTP取得に統一しています。Widget・uploadFile・Connector中継URLは削除しました。既存クライアントもツール一覧を更新してください。
 
 1. `read_file(course_id, file_id)`で取得手順を得る。原本本体はMCPへ埋め込まない。
 2. `get_web_session`でSESSIONを得る。`scombz:session`の明示的なOAuth承認が必要。既存の読み取り権限は自動昇格しない。
