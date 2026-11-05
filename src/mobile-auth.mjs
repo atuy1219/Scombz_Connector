@@ -1,3 +1,4 @@
+import { WEB_HEADERS } from './http-policy.mjs';
 import { encrypt, decrypt } from './crypto.mjs';
 import { ScombError } from './errors.mjs';
 
@@ -241,9 +242,7 @@ export class MobileAuthClient {
             redirect: 'manual',
             signal: AbortSignal.timeout(25000),
             headers: {
-              Accept: 'text/html,application/xhtml+xml',
-              'Accept-Language': 'ja,en;q=0.8',
-              'User-Agent': 'Mozilla/5.0',
+              ...WEB_HEADERS,
               ...(cookieJar.size
                 ? { Cookie: [...cookieJar].map(([name, value]) => `${name}=${value}`).join('; ') }
                 : {}),

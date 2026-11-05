@@ -45,7 +45,7 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
     list.result.tools.some((tool) => tool.name === 'open_file_in_chat'),
     false,
   );
-  assert.ok(initialization.result.instructions.includes('Mozilla/5.0'));
+  assert.ok(initialization.result.instructions.includes('完全なUser-Agent'));
   const resources = await (
     await handle(rpc({ jsonrpc: '2.0', id: 3, method: 'resources/list' }), env)
   ).json();

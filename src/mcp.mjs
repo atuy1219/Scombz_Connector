@@ -229,7 +229,7 @@ export async function mcpResponse(request, env, options = {}) {
   register(
     'read_file',
     '教材・課題添付の直接取得手順',
-    '原本本体をMCPへ埋め込まず、ScombZからHTTPで直接取得する手順を返します。get_web_sessionのSESSIONをメモリ内で使用し、prepare_requestをGETして得た一時IDをURLエンコードしてdownload_requestへ入れ、同じSESSIONでGETしてください。全GETで返されたheaders（User-Agent: Mozilla/5.0を含む）を必ず使用してください。403/Scomb_newsだけでSESSION失効と判断せず、ヘッダーを確認します。HTTP 200だけで成功とせず本文サイズ・形式を確認。CookieはScombZだけに送りリダイレクトを追跡しません。',
+    '原本本体をMCPへ埋め込まず、ScombZからHTTPで直接取得する手順を返します。get_web_sessionのSESSIONをメモリ内で使用し、prepare_requestをGETして得た一時IDをURLエンコードしてdownload_requestへ入れ、同じSESSIONでGETしてください。全GETで返されたheaders（完全なブラウザ形式User-Agentを含む）を必ず使用してください。403/Scomb_newsだけでSESSION失効と判断せず、ヘッダーを確認します。HTTP 200だけで成功とせず本文サイズ・形式を確認。CookieはScombZだけに送りリダイレクトを追跡しません。',
     { course_id: id, file_id: fileId },
     async (args) => {
       const plan = await client.materialDownloadPlan(args.course_id, args.file_id);
@@ -253,7 +253,7 @@ export async function mcpResponse(request, env, options = {}) {
           follow_redirects: false,
           success_checks: ['HTTP 200', 'nonempty_body', 'expected_file_type'],
           instructions:
-            'SESSIONをメモリ内だけで使い、prepare_requestとdownload_requestの両方に返されたheadersとCookieを付ける。User-Agent: Mozilla/5.0は必須。403/Scomb_newsは認証失効と断定せずヘッダーを先に確認する。一時IDが空・2048文字超・HTML・改行を含む場合は停止。200でも空本文なら一時IDを再発行し1回だけ再試行。PDFは%PDF-署名を確認。取得済み原本は再利用。認証切れが確認された場合のみSESSIONを更新し、一時IDも再発行する。',
+            'SESSIONをメモリ内だけで使い、prepare_requestとdownload_requestの両方に返されたheadersとCookieを付ける。返された完全なUser-Agentは必須。403/Scomb_newsは認証失効と断定せずヘッダーを先に確認する。一時IDが空・2048文字超・HTML・改行を含む場合は停止。200でも空本文なら一時IDを再発行し1回だけ再試行。PDFは%PDF-署名を確認。取得済み原本は再利用。認証切れが確認された場合のみSESSIONを更新し、一時IDも再発行する。',
         },
         retention: 'not_stored_by_connector',
         warnings: [

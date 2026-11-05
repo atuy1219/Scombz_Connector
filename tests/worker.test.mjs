@@ -1,3 +1,4 @@
+import { USER_AGENT } from '../src/http-policy.mjs';
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
@@ -97,7 +98,7 @@ before(async () => {
       upstream++;
       assert.equal(request.method, 'GET');
       assert.equal(new URL(request.url).origin, 'https://scombz.shibaura-it.ac.jp');
-      assert.equal(request.headers.get('user-agent'), 'Mozilla/5.0');
+      assert.equal(request.headers.get('user-agent'), USER_AGENT);
       assert.ok(request.headers.get('cookie').includes('SESSION=private-fixture-cookie'));
       if (upstreamMode === 'login') return new Response('<form id="loginForm"></form>');
       if (upstreamMode === 'redirect')
@@ -561,8 +562,8 @@ test('read_file returns a direct HTTP plan without loading file bytes', async ()
   );
   assert.ok(!JSON.stringify(payload).includes('private-fixture-cookie'));
   assert.equal(Object.hasOwn(value, 'download_url'), false);
-  assert.equal(value.direct_download.prepare_request.headers['User-Agent'], 'Mozilla/5.0');
-  assert.equal(value.direct_download.download_request.headers['User-Agent'], 'Mozilla/5.0');
+  assert.equal(value.direct_download.prepare_request.headers['User-Agent'], USER_AGENT);
+  assert.equal(value.direct_download.download_request.headers['User-Agent'], USER_AGENT);
 });
 test('removed proxy and widget cannot retrieve files even with a valid ticket', async () => {
   const before = upstream;

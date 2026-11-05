@@ -14,7 +14,7 @@ ScombZ ConnectorのMCPツールを使って、本人のScombZに表示される�
 3. `list_course_contents(course_id)`で教材、課題、小テスト、アンケートのIDと表示状態を調べる。過去期の項目もこのツールで取得する。`list_current_tasks`は現在のタスク一覧だけで、過去期や提出済みの全件を含むとは限らない。
 4. 課題は`get_assignment`、小テストは`get_quiz`、アンケートは`get_survey`で内容を読む。大学全体のアンケートは`list_surveys`で一覧を調べ、`get_survey`の`course_id`を省略する。`auto`は公開済み結果を優先する。未受験の問題文が要項にない場合は「受験を開始しないと取得できない」と説明する。
 5. 教材原本はモード名・件数に関係なく`read_file(course_id, file_id)`と`get_web_session`による直接HTTP取得に統一する。`read_file`は手順だけを返すので、この応答だけで資料を読んだと扱わない。`scombz:session`のOAuth権限が必要。取得済みの原本があれば再利用する。
-6. 全GETで返された`headers`を必ず使う。**`User-Agent: Mozilla/5.0`は必須**。Python標準User-Agentでは有効なSESSIONでも403/Scomb_newsが返る。授業HTMLの追加調査にも`get_web_session.request_headers`を使う。Cookieは`Cookie: SESSION=<value>`とし、値の二重付与をしない。
+6. 全GETで返された`headers`を必ず使う。**返されたheadersの完全なUser-Agentは必須**。Python標準User-Agentでは有効なSESSIONでも403/Scomb_newsが返る。授業HTMLの追加調査にも`get_web_session.request_headers`を使う。Cookieは`Cookie: SESSION=<value>`とし、値の二重付与をしない。
 7. `direct_download.prepare_request`をSESSION付きでGETして一時IDを新規発行する。空・2048文字超・HTML・改行は拒否する。trimしてURLエンコードし、`download_request.url_template`の`{temporary_file_id}`へ入れ、同じSESSIONと返されたheadersでGETする。課題添付はprepare_requestがnullなのでdownload_request.urlを直接GETする。リダイレクトは追跡しない。
 8. HTTP 200でも空本文は失敗とし、一時IDを再発行して1回だけ再試行する。PDFは`%PDF-`署名を確認してから本文・ページを読む。直接取得の容量上限は実行環境側で適用する。原本をbase64にしてMCP経由で受け取る経路はない。
 9. 403やScomb_newsへの誘導だけでSESSION失効・接続元制限と断定しない。まず全GETのUser-Agentを確認し、同じSESSION・同じURLでブラウザ形式ヘッダーを付けて比較する。401、正規のログイン画面、または/loginへの遷移で認証切れを確認した場合のみ`get_web_session(refresh=true)`を1回使い、一時IDも再発行する。
