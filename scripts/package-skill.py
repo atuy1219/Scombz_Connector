@@ -6,6 +6,6 @@ output = root / 'dist' / 'scombz-skill.zip'
 output.parent.mkdir(exist_ok=True)
 with ZipFile(output, 'w', ZIP_DEFLATED) as archive:
     for source in sorted((root / 'skills' / 'scombz').rglob('*')):
-        if source.is_file():
+        if source.is_file() and '__pycache__' not in source.parts and source.suffix != '.pyc':
             archive.write(source, source.relative_to(root / 'skills'))
 print(output)

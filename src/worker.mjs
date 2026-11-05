@@ -65,7 +65,8 @@ export async function handle(request, env, options = {}) {
       )
         return json({ message: 'Invalid JSON-RPC request' }, 400);
       const requiredScope =
-        rpc.method === 'tools/call' && rpc.params?.name === 'get_web_session'
+        rpc.method === 'tools/call' &&
+        ['get_web_session', 'prepare_file_download'].includes(rpc.params?.name)
           ? 'scombz:session'
           : 'scombz:read';
       if (!discovery.has(rpc.method) && !(await access(request, env, origin, requiredScope))) {

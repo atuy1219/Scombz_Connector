@@ -5,7 +5,7 @@ import { ScombClient, ScombError } from './client.mjs';
 import { publicFile } from './parsers.mjs';
 import { access, challenge } from './oauth.mjs';
 import { currentContext, termAt } from './current-class.mjs';
-import { DIRECT_HTTP_INSTRUCTIONS, DIRECT_HTTP_DIAGNOSTICS } from './http-policy.mjs';
+import { DIRECT_HTTP_INSTRUCTIONS, DIRECT_HTTP_DIAGNOSTICS, FILE_HEADERS } from './http-policy.mjs';
 
 const id = z
   .string()
@@ -229,7 +229,7 @@ export async function mcpResponse(request, env, options = {}) {
   register(
     'read_file',
     '教材・課題添付の直接取得手順',
-    '原本本体をMCPへ埋め込まず、ScombZからHTTPで直接取得する手順を返します。get_web_sessionのSESSIONをメモリ内で使用し、prepare_requestをGETして得た一時IDをURLエンコードしてdownload_requestへ入れ、同じSESSIONでGETしてください。全GETで返されたheaders（User-Agent: Mozilla/5.0を含む）を必ず使用してください。403/Scomb_newsだけでSESSION失効と判断せず、ヘッダーを確認します。HTTP 200だけで成功とせず本文サイズ・形式を確認。CookieはScombZだけに送りリダイレクトを追跡しません。',
+    '原本本体をMCPへ埋め込まず、ScombZからHTTPで直接取得する手順を返します。get_web_sessionのSESSIONをメモリ内で使用し、prepare_requestをGETして得た一時IDをURLエンコードしてdownload_requestへ入れ、同じSESSIONでGETしてください。全GETで返されたheaders（完全なブラウザ形式User-Agentを含む）を必ず使用してください。403/Scomb_newsだけでSESSION失効と判断せず、ヘッダーを確認します。HTTP 200だけで成功とせず本文サイズ・形式を確認。CookieはScombZだけに送りリダイレクトを追跡しません。',
     { course_id: id, file_id: fileId },
     async (args) => {
       const plan = await client.materialDownloadPlan(args.course_id, args.file_id);
@@ -253,13 +253,49 @@ export async function mcpResponse(request, env, options = {}) {
           follow_redirects: false,
           success_checks: ['HTTP 200', 'nonempty_body', 'expected_file_type'],
           instructions:
-            'SESSIONをメモリ内だけで使い、prepare_requestとdownload_requestの両方に返されたheadersとCookieを付ける。User-Agent: Mozilla/5.0は必須。403/Scomb_newsは認証失効と断定せずヘッダーを先に確認する。一時IDが空・2048文字超・HTML・改行を含む場合は停止。200でも空本文なら一時IDを再発行し1回だけ再試行。PDFは%PDF-署名を確認。取得済み原本は再利用。認証切れが確認された場合のみSESSIONを更新し、一時IDも再発行する。',
+            'SESSIONをメモリ内だけで使い、prepare_requestとdownload_requestの両方に返されたheadersとCookieを付ける。返された完全なUser-Agentは必須。403/Scomb_newsは認証失効と断定せずヘッダーを先に確認する。一時IDが空・2048文字超・HTML・改行を含む場合は停止。200でも空本文なら一時IDを再発行し1回だけ再試行。PDFは%PDF-署名を確認。取得済み原本は再利用。認証切れが確認された場合のみSESSIONを更新し、一時IDも再発行する。',
         },
         retention: 'not_stored_by_connector',
         warnings: [
           'read_fileは取得手順だけを返します。原本を読み終えたことにはなりません。直接取得のサイズ上限は実行環境側で適用してください。',
         ],
       };
+    },
+  );
+  server.registerTool(
+    'prepare_file_download',
+    {
+      title: '教材の直接取得をまとめて準備',
+      description:
+        '教材の取得URL・共通ヘッダー・SESSIONを1回で返します。通常の原本取得はこのツールを優先し、付属scripts/download.pyへ構造化結果を標準入力で渡します。Cookieは保存・表示せずScombZだけに使用。原本本体は含まず、実行環境から直接取得します。',
+      inputSchema: { course_id: id, file_id: fileId, refresh: z.boolean().default(false) },
+      annotations: { ...readonly, idempotentHint: false },
+      _meta: { securitySchemes: [{ type: 'oauth2', scopes: ['scombz:session'] }] },
+    },
+    async (args) => {
+      if (!(await access(request, env, origin, 'scombz:session')))
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'SESSION受け渡しの権限でOAuth接続が必要です。' }],
+          _meta: { 'mcp/www_authenticate': [challenge(origin, 'scombz:session')] },
+        };
+      return wrap(async () => {
+        // Refresh first, then resolve metadata using that session; export any rotated cookie last.
+        if (args.refresh) await client.exportWebSession(true);
+        const plan = await client.materialDownloadPlan(args.course_id, args.file_id);
+        const auth = await client.exportWebSession();
+        return {
+          protocol: 'scombz-direct-v1',
+          file: plan.file,
+          origin: plan.origin,
+          headers: FILE_HEADERS,
+          session: auth.cookie.value,
+          prepare: plan.prepare_request?.url ?? null,
+          download: plan.download_request.url ?? plan.download_request.url_template,
+          _summary:
+            '直接取得の準備完了。構造化結果をdownload.pyの標準入力に渡してください。本文は未取得です。',
+        };
+      })(args);
     },
   );
   server.registerTool(

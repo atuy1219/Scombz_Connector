@@ -1,3 +1,4 @@
+import { USER_AGENT } from '../src/http-policy.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ScombClient, resolveMaterialDownloadUrl, validateReadUrl } from '../src/client.mjs';
@@ -72,7 +73,7 @@ const guardedFetch = async (url, options) => {
   const headers = new Headers(options.headers);
   assert.equal(headers.get('cookie'), 'SESSION=same-session');
   assert.equal(options.redirect, 'manual');
-  if (headers.get('user-agent') !== 'Mozilla/5.0')
+  if (headers.get('user-agent') !== USER_AGENT)
     return new Response('<meta content="Scomb_news">', { status: 403 });
   if (url.includes('/make/tempfile')) return new Response('new-id');
   if (url.includes('/setfiledown/') || url.includes('/submission_download/'))
@@ -80,6 +81,10 @@ const guardedFetch = async (url, options) => {
   return new Response('<div id="page_head"></div>');
 };
 test('exported headers prevent the valid-SESSION Python User-Agent 403 regression at every stage', async () => {
+  assert.match(
+    USER_AGENT,
+    /^Mozilla\/5\.0 \(X11; Linux x86_64\) AppleWebKit\/537\.36 \(KHTML, like Gecko\) Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/,
+  );
   const client = new ScombClient({}, { session, fetch: guardedFetch });
   const auth = await client.exportWebSession();
   const html = 'https://scombz.shibaura-it.ac.jp/lms/course?idnumber=c';

@@ -57,6 +57,7 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `list_surveys` / `get_survey` | アンケート一覧・設問・公開済み回答 |
 | `list_announcements` | お知らせ一覧 |
 | `get_web_session` | 直接取得用のSESSIONと必須HTTPヘッダー |
+| `prepare_file_download` | 通常の教材取得用。SESSIONと取得手順を1回で準備 |
 | `read_file` | 教材・課題添付の直接HTTP取得手順 |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
@@ -70,15 +71,25 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 ### 教材の直接取得
 
-教材原本の取得は、モード名・件数に関係なく`read_file` + `get_web_session`に統一しています。Widget・uploadFile・Connector中継URLは削除しました。既存クライアントもツール一覧を更新してください。
+通常は`prepare_file_download(course_id, file_id)`を1回呼び、返された構造化結果を`skills/scombz/scripts/download.py`の標準入力へ渡します。`python3 .../download.py output.pdf`の引数は出力先だけにし、SESSIONを含むJSONはプロセスの標準入力に直接渡してください。JSONをコマンド引数・保存ファイル・ログへ出さないでください。`scombz:session`のOAuth承認が必要です。
+
+準備ツールはメタデータだけを取得し、SESSIONと短いURL手順を一つの応答にまとめます。textとstructuredContentで同じデータを二重出力しません。ダウンロード・一時ID・空本文の1回再試行・PDF署名確認・容量制限はPython標準ライブラリの共通スクリプトで行い、原本をMCPへ流しません。既存ファイルは上書きしません。
+
+既知のID・SESSIONキャッシュ・取得済み原本を再利用し、接続確認・時間割取得・ログインを繰り返しません。複数原本は逐次取得し、403・429・503では連続再試行を止めます。`Retry-After`を尊重し、人工的な操作履歴やランダムな待ち時間は作りません。サイトのブロック回避は保証しません。
+
+共通スクリプトが使えない環境では、以下の個別ツールによる直接取得を使用できます。
+
+教材原本の取得は、モード名・件数に関係なく直接HTTP取得に統一しています。Widget・uploadFile・Connector中継URLは削除しました。既存クライアントもツール一覧を更新してください。
 
 1. `read_file(course_id, file_id)`で取得手順を得る。原本本体はMCPへ埋め込まない。
 2. `get_web_session`でSESSIONを得る。`scombz:session`の明示的なOAuth承認が必要。既存の読み取り権限は自動昇格しない。
-3. 全GETで返された`headers`を必ず使い、`Cookie: SESSION=<value>`を付ける。**`User-Agent: Mozilla/5.0`は必須**。授業HTMLの追加調査には`get_web_session.request_headers`を使う。
+3. 全GETで返された`headers`を必ず使い、`Cookie: SESSION=<value>`を付ける。**返されたheadersの完全なUser-Agentは必須**。授業HTMLの追加調査には`get_web_session.request_headers`を使う。
 4. `prepare_request.url`をGETして一時IDを新規発行する。空・2048文字超・HTML・改行を拒否し、trim後URLエンコードして`download_request.url_template`へ入れる。同じSESSIONで原本をGETする。課題添付はprepare_requestがnullなのでdownload_request.urlをそのまま使う。
 5. HTTP 200・空でない本文・期待する形式を確認する。PDFは`%PDF-`署名を確認して本文やページを読む。空本文なら一時IDを再発行して1回だけ再試行する。
 
 Cookieはメモリ内だけで扱い、通常の返信・ログ・コマンド引数・保存ファイルへ載せません。送信先は返されたScombZ origin限定で、自動リダイレクトを追跡しません。容量上限は実行環境側で適用します。取得済み原本は再利用します。直接HTTPを実行できないホストでは、その制約を説明します。
+
+UAは`src/http-policy.mjs`の`USER_AGENT`一か所に定義したLinux版Chrome形式の互換性プロファイルです。現在の固定値はChrome/153.0.0.0で、最新バージョンを自動追従するものではありません。Web SESSION交換・HTML・教材取得・外部へ返す取得手順で共有します。Mobile APIへのJSON通信は従来の製品UAを維持します。`Accept`はHTML用とファイル用を分け、`Accept-Language`も共通化しています。`Sec-CH-UA`や`Sec-Fetch-*`はブラウザの状態を再現できないため追加しません。ヘッダーを整えてもHTTP/TLS実装までブラウザと同じになるわけではありません。
 
 ### 403の切り分け
 
@@ -174,7 +185,7 @@ Deployボタンで作成した**利用者側のリポジトリ**にpushすると
 | ScombZが未接続 / Mobile API認証が期限切れ | Workerの管理画面を開き、ScombZへ再ログイン |
 | OAuthの `invalid_client` | 暗号化キーを変更した場合はChatGPTのMCP接続を作り直す |
 | ChatGPTにツールがない | 接続情報を更新して新しいチャットで選択 |
-| 直接取得が403 / Scomb_news | 全GETのUser-AgentがMozilla/5.0か確認。403だけで認証切れと断定しない |
+| 直接取得が403 / Scomb_news | 全GETのUser-Agentが返されたheadersと一致するか確認。403だけで認証切れと断定しない |
 
 暗号化キーを変更すると、既存のScombZ認証は復号できなくなり、署名済みクライアント・トークンも使えなくなります。管理画面からScombZへ再ログインし、ChatGPTのMCP接続を作り直してください。
 

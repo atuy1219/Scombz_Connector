@@ -1,3 +1,4 @@
+import { WEB_HEADERS } from '../src/http-policy.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { MobileAuthClient } from '../src/mobile-auth.mjs';
@@ -59,6 +60,9 @@ test('Mobile API login stores only the bearer token and OTKEY bridge yields SESS
           return json([{ classId: 'COURSE1' }]);
         }
         if (url.host === 'mobile.scombz.shibaura-it.ac.jp') {
+          assert.equal(init.headers['User-Agent'], WEB_HEADERS['User-Agent']);
+          assert.equal(init.headers.Accept, WEB_HEADERS.Accept);
+          assert.equal(init.headers['Accept-Language'], WEB_HEADERS['Accept-Language']);
           assert.equal(url.pathname, '/one-time-key/lms/course');
           assert.equal(url.searchParams.get('idnumber'), 'COURSE1');
           return new Response(null, {
