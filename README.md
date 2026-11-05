@@ -56,7 +56,8 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `get_quiz` | 受験前の要項・公開済み結果 |
 | `list_surveys` / `get_survey` | アンケート一覧・設問・公開済み回答 |
 | `list_announcements` | お知らせ一覧 |
-| `read_file` | 高度な直接HTTP取得用。大量処理・ScombZページ調査・Widget非対応時のフォールバック |
+| `get_web_session` | 直接取得用のSESSIONと必須HTTPヘッダー |
+| `read_file` | 教材・課題添付の直接HTTP取得手順 |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
 | `get_current_course_tasks` | 現在の授業の課題・小テスト・アンケート一覧 |
@@ -67,68 +68,35 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 前期は `first`、後期は `second`。省略時は日本時間の現在期を使い、1〜3月は前年度後期として扱います。
 
 
-### AIの教材取得ルーティング
+### 教材の直接取得
 
-教材原本の取得方法は、Chat / Workというモード名だけで固定せず、**目的・必要権限・利用可能なホスト機能**で選びます。通常は最小権限のWidget経路を優先し、直接HTTP取得は高度な処理またはフォールバックに限定します。
+教材原本の取得は、モード名・件数に関係なく`read_file` + `get_web_session`に統一しています。Widget・uploadFile・Connector中継URLは削除しました。既存クライアントもツール一覧を更新してください。
 
-| 状況 | 推奨経路 | 理由 |
-| --- | --- | --- |
-| 1件〜少数の教材を取得・要約・比較する | `open_file_in_chat` | SESSIONをChatGPTへ渡さず、ChatGPT Filesへ原本を受け渡せる |
-| 取得済み教材を後で再利用する | `open_file_in_chat` → ChatGPT Files/Library | 原本をChatGPT側へ保持して再利用しやすい |
-| 多数の教材を連続取得・横断処理する | Work等の実行環境 + `read_file` + `get_web_session` | 直接HTTP処理の方がバッチ処理・ローカル解析に向く |
-| ScombZページ構造やページ内リンクを追加調査する | Work等の実行環境 + 直接HTTP | HTML・JavaScript・外部リンクを含む調査に向く |
-| Widget / `uploadFile` が利用できない、または失敗する | `read_file` + `get_web_session` | Widget経路のフォールバック |
-| 単にPDF原本を読みたい | **Widget経路を優先** | `scombz:session` の追加権限を要求しない |
+1. `read_file(course_id, file_id)`で取得手順を得る。原本本体はMCPへ埋め込まない。
+2. `get_web_session`でSESSIONを得る。`scombz:session`の明示的なOAuth承認が必要。既存の読み取り権限は自動昇格しない。
+3. 全GETで返された`headers`を必ず使い、`Cookie: SESSION=<value>`を付ける。**`User-Agent: Mozilla/5.0`は必須**。授業HTMLの追加調査には`get_web_session.request_headers`を使う。
+4. `prepare_request.url`をGETして一時IDを新規発行する。空・2048文字超・HTML・改行を拒否し、trim後URLエンコードして`download_request.url_template`へ入れる。同じSESSIONで原本をGETする。課題添付はprepare_requestがnullなのでdownload_request.urlをそのまま使う。
+5. HTTP 200・空でない本文・期待する形式を確認する。PDFは`%PDF-`署名を確認して本文やページを読む。空本文なら一時IDを再発行して1回だけ再試行する。
 
-ConnectorがChatとWorkをサーバー側で厳密に判定して分岐するわけではありません。MCP instructions、各ツールのdescription、ホストが提供する機能、ユーザーの依頼内容をもとにChatGPT側が経路を選択します。したがって、WorkでもWidgetが利用でき、少数教材の取得だけで目的を満たすなら `open_file_in_chat` を使って構いません。一方、直接HTTP取得は `scombz:session` という強い権限を必要とするため、Widgetで目的を達成できる場合は優先しません。
+Cookieはメモリ内だけで扱い、通常の返信・ログ・コマンド引数・保存ファイルへ載せません。送信先は返されたScombZ origin限定で、自動リダイレクトを追跡しません。容量上限は実行環境側で適用します。取得済み原本は再利用します。直接HTTPを実行できないホストでは、その制約を説明します。
 
-### 高度な教材の直接取得（Work / フォールバック）
+### 403の切り分け
 
-`read_file(course_id, file_id)` は、Widget経路では足りない高度な調査・大量処理、またはWidget非対応時のフォールバック用です。科目ページから教材の存在と取得パラメーターを確認し、`direct_download` に原本の直接取得手順を返します。原本本体・base64・分割リソースは返しません。通常の単一教材取得では、追加の `scombz:session` 権限を必要としない `open_file_in_chat` を優先してください。ツールの応答だけで資料を読み終えたとは扱わないでください。
+2026-11-05に、同じSESSION・同じ授業URLでPython標準User-Agentは403、`Mozilla/5.0`は200になることを確認しました。一時ID発行・PDF取得もブラウザ形式のUser-Agentで成功しています。大学側の具体的な判定規則は不明です。
 
-1. `get_web_session` でSESSIONを取得する。`scombz:session` の明示的なOAuth承認が必要。`read_file` 自体は従来の `scombz:read` のままで、Cookieを返さない。
-2. 教材の `prepare_request.url` をSESSION Cookie付きでGETし、一時ファイルIDを新規発行する。
-3. 応答が空・2048文字超・HTML・改行を含む場合は停止する。有効なら前後の空白を除き、`encodeURIComponent`相当でURLエンコードして `download_request.url_template` の `{temporary_file_id}` に入れる。
-4. **同じSESSION**で原本URLをGETする。課題添付は `prepare_request: null` なので `download_request.url` をそのまま使う。
-5. HTTP 200だけで成功とせず、空でない本文と期待するファイル形式を確認する。PDFなら `%PDF-` の先頭署名を確認する。
+403やScomb_newsへの誘導だけでSESSION失効・接続元制限と断定しません。まず全GETのUser-AgentとCookie添付を確認し、同じSESSIONで比較します。401、正規のログイン画面、または/loginへの遷移で認証切れを確認したときだけ`get_web_session(refresh=true)`を1回使い、一時IDも新しく発行します。必須ヘッダーはConnector内のHTTP通信・取得手順・SESSION応答で共有し、再発を防ぎます。
 
-古い一時IDでは200でも本文が空になることがあります。空本文のときだけ一時IDを再発行して1回再試行してください。SESSIONの認証切れが確認された場合だけ `get_web_session(refresh=true)` を使い、一時IDも新規発行します。取得済みファイルは再利用し、特定ページの確認や本文抽出は実行環境側で行います。
-
-Cookieは実行環境のメモリ内だけで使用し、通常の返信・ログ・コマンド引数・保存ファイルへ載せません。通信先は `https://scombz.shibaura-it.ac.jp` に限定し、リダイレクトを追跡しません。原本はScombZから実行環境へ直接流れるため、MCPのtool resultサイズに左右されません。直接取得の容量上限は実行環境側で適用してください。
-
-2026-10-07の本人指定資料で、SESSION付きの直接HTTP取得を確認しました。渡部研PDFは53,247,528バイト（50.78MiB）全体、パトハック研PDFは原本サイズ7,536,336バイト（7.19MiB）のうち先頭6MiBを取得し、HTTP 200・application/pdf・PDF署名を確認しています。原本・Cookie・実教材情報はリポジトリに保存していません。
-
-### 中継URLと確認ポリシー
-
-`download_url` は直接取得ができない環境だけの代替です。`download_url_role: connector_proxy_fallback_only` として返し、Connectorの `/files/` が保存済み認証でScombZから原本をストリーミング取得します。中継上限は100MiB、署名付きリンクは10分間有効です。教材はConnectorへ永続保存しません。リンクを公開・無関係なサービスへ転送しないでください。管理画面でOAuth接続を解除しても、発行済みリンクは最大10分残ります。ScombZ認証の削除で中継取得も停止します。
-
-読み取りツールには `readOnlyHint: true` / `openWorldHint: false` を指定しています。資料取得を依頼済みならConnector独自の実体化確認を追加で要求しません。ただしSESSIONのOAuth承認やホスト側の実体化・通信・ツール承認ポリシーをサーバーから無条件許可にはできません。
+読み取りツールには`readOnlyHint: true`を指定しています。資料取得を依頼済みならConnector独自の追加確認を要求しません。OAuth承認やホストの通信・ツール承認ポリシーには従います。
 
 ### 現在の授業
 
-「今の授業の資料を取って要約して」にはまず `get_current_class_context()` を使って対象授業と教材を特定します。少数の教材を読むだけなら結果の `materials` から `open_file_in_chat` を使うのが標準です。多数の教材を連続処理する、ページ内リンクを追跡する、ScombZページ自体を追加調査するなど、Widget経路では不足する場合だけ `read_file` + `get_web_session` の直接取得へ切り替えます。`get_current_class_context()` 自体は教材原本をまとめて取得するツールではありません。
+「今の授業の資料を取って要約して」には、まず`get_current_class_context()`で対象授業と教材を特定します。結果の`materials`から`read_file` + `get_web_session`で原本を直接取得します。コンテキスト取得だけでは教材原本を読んだことにはなりません。
 
 4つの現在授業ツールは `at`（タイムゾーン付きISO日時、省略時は現在）、`year`、`semester`、`margin_minutes`（0〜30、省略時0）を受け取ります。日本時間の曜日と大学公式の時限（9:00–10:40、10:50–12:30、13:20–15:00、15:10–16:50、17:00–18:40、18:50–20:30）から本人のScombZ時間割を照合します。実際の授業時間帯を優先し、それ以外のときだけ前後の余裕時間を使います。
 
 結果は `matched` / `ambiguous` / `no_class`。候補が複数なら `course: null` と `matches` を返し、自動選択しません。オンデマンドなど曜日・時限を特定できない科目は除外します。休講・祝日・補講・授業期間外は未確認で、週次時間割に基づく候補として返します。教材一覧から該当回・最新回を勝手に断定しません。
 
 時限の出典: https://www.shibaura-it.ac.jp/campus_life/class/schedule.html
-
-## 標準の教材取得（Chat / Widget）
-
-`open_file_in_chat(course_id, file_id)` は、ChatGPTで教材原本を読むときの**標準経路**です。Chat / Workを問わず、Widgetと `uploadFile` が利用でき、少数教材の取得で目的を達成できる場合はこの経路を優先します。Widgetは表示後に自動で、Workerが保存済みSESSIONを使って一時IDを発行し、原本をストリーミング取得して `window.openai.uploadFile(File)` へ渡します。通常時にアップロードボタン操作は不要です。アップロード後は `window.openai.getFileDownloadUrl({ fileId })` でChatGPT側の一時URLを取得し、MCP Appsの `ui/message` に `resource_link` を直接含めて本文確認ターンを自動送信します。`ui/message` がresource linkを受け付けないホストでは `ui/update-model-context` へ渡してからテキストメッセージを送るフォールバックを使います。SESSIONはWidget・モデルへ渡しません。PDF本体はMCP応答を通らないため、MCPの埋め込み転送上限を避けます。`read_file` + `get_web_session` の直接HTTP取得は、大量処理・追加調査・Widget非対応時の高度な経路として残しています。
-
-- 原本はConnectorへ保存しません。最大100 MiB、取得リンクは10分間有効です。期限切れ時はWidgetからリンクを更新できます。
-- ChatGPTへのアップロードと `resource_link` を添付した後続メッセージの送信が両方成功した場合だけ、`window.openai.requestClose()` でWidgetを自動的に閉じます。ファイル参照の引き渡しに失敗した場合はWidgetを残し、原本の再取得や再アップロードなしに参照送信を再試行できます。`ui/message` の受理はモデル側でのPDF読取成功を保証しません。
-- ファイルID・種別はモデル向け結果、署名付きURLはWidget専用 `_meta` に分けます。サイズ・ファイル名・MIME型は原本未取得時点では不明（`null`）です。
-- `open_file_in_chat` はIDの構文検証と署名ticketの発行だけを行い、ScombZ教材ページを取得しません。教材情報はWidgetの `/files` アクセス時に一度解決し、実際のファイル名・MIME型をレスポンスヘッダーから受け取ります。準備時の `file.filename` と `mime_type` は `null` です。このツールのtext応答は短い要約とし、構造化データとのJSON重複を避けます。他ツールのtext応答は既存の互換性を維持します。
-- 自動アップロードは `library: true` を指定しますが、これは保存要求です。Widgetの状態には `library_save_requested: true` / `library_status: unverified` と記録し、モデル側のFiles/Library検索・読取が確認されるまで「保存完了」と断定しません。正常時の確認用メッセージは教材名と元の依頼を続行する指示だけにします。ファイル参照の受け渡しに失敗した場合のみ、`uploadFile` が返した `fileId` とFiles/Libraryによる保存・読取のフォールバック案内を送ります。ChatGPTの拡張APIが未対応なら原本をダウンロードして会話へ添付する案内を表示します。
-- アップロード完了はPDF本文のモデル読取成功と同義ではありません。ChatGPTが発行した一時ダウンロードURLを `resource_link` として確認用の `ui/message` に直接添付し、本文を実際に確認してから元の依頼を続行するように促します。特定ページの確認は指定しません。ファイル参照の受け渡しに失敗した場合だけfileIdをモデル可視テキストへ渡し、ホストがFiles/Library操作を提供していれば、そのfileIdを元ファイル参照としてライブラリへ保存してから読み取るフォールバックを使います。`openai/fileParams` はChatGPTからMCPツールへファイルを入力する仕組みであり、Widgetから会話へ添付するAPIとしては扱いません。
-- **PoCの未確認部分:** 自動（ユーザー操作なし）の `uploadFile` が全ChatGPTホストで許可されるか、モデル側Files/LibraryがWidgetの `fileId` を元ファイル参照として受け入れるか、`resource_link` を含む `ui/message` が新規アップロードPDFを通常の会話添付として安定してモデルへ渡せるか、ホスト固有のアップロード容量上限。Widgetの `handoff_status: linked` は送信APIの受理を意味し、本文確認済みではありません。後続の `ui/message` が回答生成後に届くこともあり、同一ターンでの自動再開は保証されません。ChatGPT実機で7.19 MiBのPDFのページ内容まで確認してから、約50 MiBのPDFも試してください。
-
-WidgetのCSPはそのWorker originだけを `connectDomains` に許可します。WorkerのCORSは署名付き `/files/` のGET/OPTIONSだけで、ブラウザが送るOriginをその応答に限って反映します。ChatGPT Web/Android/iOSなどホストごとのsandbox originを固定列挙しません。管理画面・OAuth・MCPへの別originアクセスは許可しません。CORSは認証の代わりではなく、期限・科目・ファイルに結びついた署名ticketを必ず検証し、ブラウザ経由ではadmin keyやOAuth bearerをticketの代用にできません。opaqueな `Origin: null` は許可しません。
-
-公式仕様: https://developers.openai.com/plugins/reference 、 https://developers.openai.com/plugins/build/chatgpt-ui
 
 ## Skill（任意）
 
@@ -181,7 +149,7 @@ npx wrangler secret put SESSION_ENCRYPTION_KEY
 npm run deploy
 ```
 
-Secretsの設定でWorker未作成と表示された場合は、Wranglerの作成確認に従うか、先に `npx wrangler deploy` を実行してからSecretsと `npm run deploy` を設定します。WranglerはD1を自動作成し、設定へIDを反映できます。`npm run deploy` はWorkerデプロイ後に `DB` バインディングのマイグレーションを適用します。DBの作成に失敗した場合は `npx wrangler d1 create scombz-connector` で作成し、返された `database_id` を `wrangler.jsonc` に設定して再実行します。
+Secretsの設定でWorker未作成と表示された場合は、Wranglerの作成確認に従うか、先に `npx wrangler deploy` を実行してからSecretsと `npm run deploy` を設定します。WranglerはD1を自動作成し、設定へIDを反映できます。`npm run deploy` はWorkerデプロイ前に `DB` バインディングのマイグレーションを適用します。DBの作成に失敗した場合は `npx wrangler d1 create scombz-connector` で作成し、返された `database_id` を `wrangler.jsonc` に設定して再実行します。
 
 ### 検証
 
@@ -206,9 +174,9 @@ Deployボタンで作成した**利用者側のリポジトリ**にpushすると
 | ScombZが未接続 / Mobile API認証が期限切れ | Workerの管理画面を開き、ScombZへ再ログイン |
 | OAuthの `invalid_client` | 暗号化キーを変更した場合はChatGPTのMCP接続を作り直す |
 | ChatGPTにツールがない | 接続情報を更新して新しいチャットで選択 |
-| 資料リンクが401 | 取得済みのChatGPTファイルを再利用。未取得の場合だけ `read_file` で再取得 |
+| 直接取得が403 / Scomb_news | 全GETのUser-AgentがMozilla/5.0か確認。403だけで認証切れと断定しない |
 
-暗号化キーを変更すると、既存のScombZ認証は復号できなくなり、署名済みクライアント・トークン・資料リンクも使えなくなります。管理画面からScombZへ再ログインし、ChatGPTのMCP接続を作り直してください。
+暗号化キーを変更すると、既存のScombZ認証は復号できなくなり、署名済みクライアント・トークンも使えなくなります。管理画面からScombZへ再ログインし、ChatGPTのMCP接続を作り直してください。
 
 ## 参照資料
 
@@ -227,27 +195,8 @@ MIT License。教材・課題等の著作権は各権利者に帰属します。
 
 既存の`scombz:read`権限だけではSESSIONを受け取れません。OAuthで`scombz:read scombz:session`を指定して再接続し、認証受け渡しを明記した承認画面で許可します。古いアクセストークン・更新トークンは読み取り権限のままで、更新時にも権限は増えません。SESSIONの取得自体にHTML取得は伴いません。不在・期限切れの場合はOTKEYで認証だけを更新します。直接アクセスで認証切れを確認した場合は`refresh=true`で再取得します。
 
-SESSIONは本人としてWebへアクセスする認証情報で、読み取り専用に制限できません。ChatGPT側で課題提出・受験開始・回答などを書き込む前は、毎回、対象と内容を本人に示し承認を得てください。この構成ではConnectorが直接通信を監視・制御できないため、毎回の確認はChatGPT側の操作手順で守ります。Cookieはメモリ内だけで使用し、会話本文・コマンド出力・共有ファイル・GitHubへ掲載せず、ScombZ以外へ送らず、リダイレクトを自動追跡しません。受け渡したCookieの大学側での失効時刻は保証できません。Connector側の認証を削除しても、既に渡したCookieが大学側で即時失効するとは限りません。
+SESSIONは本人としてWebへアクセスする認証情報で、読み取り専用に制限できません。この連携では取得・調査にのみ使用し、課題提出・受験開始・回答・一時保存などの書き込みは行いません。Cookieはメモリ内だけで使用し、会話本文・コマンド出力・共有ファイル・GitHubへ掲載せず、ScombZ以外へ送らず、リダイレクトを自動追跡しません。受け渡したCookieの大学側での失効時刻は保証できません。Connector側の認証を削除しても、既に渡したCookieが大学側で即時失効するとは限りません。
 
 適用時は`0004_session_export_scope.sql`をD1に適用してからWorkerを更新します。`npm run deploy`はこの順序で実行します。
 
 書き込み機能は削除しました。更新時は `0005_remove_write_support.sql` を適用し、保存済みの提出下書きと旧書き込み権限を削除します。過去のマイグレーションは適用履歴の互換性のため保持します。SESSION受け渡しは取得・調査専用で、提出や受験開始には使用しません。
-
-### 教材Widgetの診断
-
-教材取得が進まない場合はWidgetの「診断情報」を開きます。「デバッグ用に成功後もこの画面を残す」を選ぶと、参照送信に成功しても自動終了しません。「診断ログをコピー」で結果を共有できます。クリップボードAPIが使えないホストではテキストを選択して手動でコピーします。
-
-ログにはホストAPIの有無、各処理の開始・成功・失敗、所要時間、取得時のHTTPステータス、分類済みエラーと数値RPCコードを記録します。15秒間応答がない処理は `waiting` と表示します。これは失敗やキャンセルではなく、重複アップロードを避けるため処理を継続します。直近80イベントを保持し、アップロード後はWidgetのprivate stateにも記録します。ログにはURL、ticket、SESSION、ファイルID、教材本文、任意の例外メッセージを含めません。
-
-| stage | 確認する箇所・次の対応 |
-| --- | --- |
-| `host_connect` / `tool_metadata` | ホスト接続・教材メタデータの到着。接続失敗なら教材を開き直す |
-| `download` / `download_http` | Worker経由の原本取得。401・expiredならリンク更新、413なら容量上限を確認 |
-| `upload` | ChatGPTのアップロードAPI。permission_deniedならホスト側の承認状態を確認 |
-| `resolve_file_url` | アップロード済みファイルの参照URL発行。unavailableならホストAPI未対応 |
-| `resource_message` | resource_link付き後続メッセージの受理。失敗時はmodel_context経路へ移る |
-| `model_context` / `followup_message` | 代替コンテキスト登録と後続通知。失敗時はPDF受け渡しを再試行 |
-| `file_id_fallback` | 参照送信失敗後のfileId通知 |
-| `widget_close` / `widget_state` / `refresh_link` | 画面終了・状態保存・取得リンク更新 |
-
-`linked` はホストAPIの受理だけを示します。ChatGPT内部のPDF取り込み、Library保存完了、モデルの本文読取、後続通知による回答再開はConnectorから観測できません。実ホストでは診断ログと、本文にある具体的な内容を読めたかを分けて確認してください。
