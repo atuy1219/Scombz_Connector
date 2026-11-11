@@ -3,6 +3,7 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { z } from 'zod';
 import { ScombClient, ScombError } from './client.mjs';
 import { prepareOtkeyFileUrl } from './otkey-download.mjs';
+import { createPdfRelayUrl } from './pdf-relay.mjs';
 import { publicFile } from './parsers.mjs';
 import { access, challenge } from './oauth.mjs';
 import { currentContext, termAt } from './current-class.mjs';
@@ -281,6 +282,43 @@ export async function mcpResponse(request, env, options = {}) {
           'read_fileは取得手順だけを返します。原本を読み終えたことにはなりません。直接取得のサイズ上限は実行環境側で適用してください。',
         ],
       };
+    },
+  );
+  server.registerTool(
+    'prepare_pdf_relay_url',
+    {
+      title: 'PDF原本の直接取得URL',
+      description:
+        'Cloudflare Workerから教材PDFをHTTP 200 application/pdfで直接返す短命署名付きURLを生成します。ScombZのSESSIONと一時IDはWorker内部だけで使い、ChatGPT側にCookie付き302リダイレクトやmaterializeを要求しません。PDF自体はこのMCPツール結果には含みません。URLは120秒間だけ有効な認証情報です。通常の返信・ログ・公開リンクに記載しないでください。',
+      inputSchema: { course_id: id, file_id: fileId },
+      annotations: { ...readonly, idempotentHint: false },
+      _meta: { securitySchemes: [{ type: 'oauth2', scopes: ['scombz:session'] }] },
+    },
+    async (args) => {
+      if (!(await access(request, env, origin, 'scombz:session')))
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'SESSION受け渡しの権限でOAuth接続が必要です。' }],
+          _meta: { 'mcp/www_authenticate': [challenge(origin, 'scombz:session')] },
+        };
+      return wrap(async () => {
+        const value = await createPdfRelayUrl(client, env, origin, args.course_id, args.file_id);
+        return {
+          ...value,
+          _summary:
+            '短命のPDF原本URLを生成しました。構造化結果にURLがあります。このURLは認証情報であり、URLのまま公開せず認証済みの取得環境のみで扱ってください。生成段階ではまだPDF本体を取得していません。',
+          _content: [
+            {
+              type: 'resource_link',
+              uri: value.url,
+              name: value.file.filename,
+              title: value.file.filename,
+              mimeType: 'application/pdf',
+              annotations: { audience: ['assistant'], priority: 1 },
+            },
+          ],
+        };
+      })(args);
     },
   );
   server.registerTool(
