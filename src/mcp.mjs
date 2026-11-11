@@ -289,7 +289,7 @@ export async function mcpResponse(request, env, options = {}) {
     {
       title: 'PDF原本の直接取得URL',
       description:
-        'Cloudflare Workerから教材PDFをHTTP 200 application/pdfで直接返す短命署名付きURLを生成します。ScombZのSESSIONと一時IDはWorker内部だけで使い、ChatGPT側にCookie付き302リダイレクトやmaterializeを要求しません。PDF自体はこのMCPツール結果には含みません。URLは120秒間だけ有効な認証情報です。通常の返信・ログ・公開リンクに記載しないでください。',
+        'Cloudflare Workerから教材PDFをHTTP 200 application/pdfで直接返す短命署名付きURLを生成します。ScombZのSESSIONと一時IDはWorker内部だけで使い、Cookie付き302リダイレクトは不要です。PDF本体やMCP resource_linkは返しません（ChatGPTのファイル実体化承認を自動的に起動しないため）。URLは120秒間だけ有効な認証情報です。通常の返信・ログ・公開リンクに記載しないでください。',
       inputSchema: { course_id: id, file_id: fileId },
       annotations: { ...readonly, idempotentHint: false },
       _meta: { securitySchemes: [{ type: 'oauth2', scopes: ['scombz:session'] }] },
@@ -307,16 +307,6 @@ export async function mcpResponse(request, env, options = {}) {
           ...value,
           _summary:
             '短命のPDF原本URLを生成しました。構造化結果にURLがあります。このURLは認証情報であり、URLのまま公開せず認証済みの取得環境のみで扱ってください。生成段階ではまだPDF本体を取得していません。',
-          _content: [
-            {
-              type: 'resource_link',
-              uri: value.url,
-              name: value.file.filename,
-              title: value.file.filename,
-              mimeType: 'application/pdf',
-              annotations: { audience: ['assistant'], priority: 1 },
-            },
-          ],
         };
       })(args);
     },
@@ -344,16 +334,6 @@ export async function mcpResponse(request, env, options = {}) {
           ...result,
           _summary:
             '教材PDF用のOTKEY認証URLを準備しました。構造化結果のURLは認証情報なので秘匿し、対応するHTTPクライアントでCookie付きリダイレクトを処理してください。原本は未取得です。',
-          _content: [
-            {
-              type: 'resource_link',
-              uri: result.url,
-              name: result.file.filename,
-              title: result.file.filename,
-              mimeType: 'application/pdf',
-              annotations: { audience: ['assistant'], priority: 0.9 },
-            },
-          ],
         };
       })(args);
     },
