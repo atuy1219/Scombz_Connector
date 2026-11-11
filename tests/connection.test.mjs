@@ -40,7 +40,7 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 17);
+  assert.equal(list.result.tools.length, 18);
   assert.equal(
     list.result.tools.some((tool) => tool.name === 'open_file_in_chat'),
     false,
@@ -60,7 +60,7 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
       {
         type: 'oauth2',
         scopes: [
-          ['get_web_session', 'prepare_file_download'].includes(tool.name)
+          ['get_web_session', 'prepare_file_download', 'prepare_otkey_file_url'].includes(tool.name)
             ? 'scombz:session'
             : 'scombz:read',
         ],

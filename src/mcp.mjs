@@ -2,6 +2,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { z } from 'zod';
 import { ScombClient, ScombError } from './client.mjs';
+import { prepareOtkeyFileUrl } from './otkey-download.mjs';
 import { publicFile } from './parsers.mjs';
 import { access, challenge } from './oauth.mjs';
 import { currentContext, termAt } from './current-class.mjs';
@@ -260,6 +261,43 @@ export async function mcpResponse(request, env, options = {}) {
           'read_fileは取得手順だけを返します。原本を読み終えたことにはなりません。直接取得のサイズ上限は実行環境側で適用してください。',
         ],
       };
+    },
+  );
+  server.registerTool(
+    'prepare_otkey_file_url',
+    {
+      title: 'OTKEY付き教材PDF取得URL',
+      description:
+        '教材PDFの一時IDを発行し、別の新規OTKEYを組み込んだ短命の取得URLを返します。原本をMCPに埋め込みません。検証済みのdownload.pdf（ASCIIパス）を使用します。URLは認証情報そのものなので、通常の返信・ログ・共有ファイルへ掲載しないでください。利用側は302で発行されたSESSION Cookieを保持する必要があります。scombz:sessionのOAuth承認が必要です。',
+      inputSchema: { course_id: id, file_id: fileId },
+      annotations: { ...readonly, idempotentHint: false },
+      _meta: { securitySchemes: [{ type: 'oauth2', scopes: ['scombz:session'] }] },
+    },
+    async (args) => {
+      if (!(await access(request, env, origin, 'scombz:session')))
+        return {
+          isError: true,
+          content: [{ type: 'text', text: 'SESSION受け渡しの権限でOAuth接続が必要です。' }],
+          _meta: { 'mcp/www_authenticate': [challenge(origin, 'scombz:session')] },
+        };
+      return wrap(async () => {
+        const result = await prepareOtkeyFileUrl(client, args.course_id, args.file_id);
+        return {
+          ...result,
+          _summary:
+            '教材PDF用のOTKEY認証URLを準備しました。構造化結果のURLは認証情報なので秘匿し、対応するHTTPクライアントでCookie付きリダイレクトを処理してください。原本は未取得です。',
+          _content: [
+            {
+              type: 'resource_link',
+              uri: result.url,
+              name: result.file.filename,
+              title: result.file.filename,
+              mimeType: 'application/pdf',
+              annotations: { audience: ['assistant'], priority: 0.9 },
+            },
+          ],
+        };
+      })(args);
     },
   );
   server.registerTool(

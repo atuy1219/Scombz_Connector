@@ -58,6 +58,7 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `list_announcements` | お知らせ一覧 |
 | `get_web_session` | 直接取得用のSESSIONと必須HTTPヘッダー |
 | `prepare_file_download` | 通常の教材取得用。SESSIONと取得手順を1回で準備 |
+| `prepare_otkey_file_url` | 実験的。教材PDFの一時IDを発行し、新しいOTKEYを含む短命の取得URLを返す（`scombz:session`） |
 | `read_file` | 教材・課題添付の直接HTTP取得手順 |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
@@ -68,6 +69,14 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 前期は `first`、後期は `second`。省略時は日本時間の現在期を使い、1〜3月は前年度後期として扱います。
 
+
+### OTKEY付きURLの生成（実験的）
+
+`prepare_otkey_file_url(course_id, file_id)`は、教材PDFの一時IDを認証済みセッションで発行した後、新しいOTKEYを取得します。検証済みのASCIIパス`/lms/course/material/setfiledown/download.pdf`と元の`fileName`、`fileId`等のパラメータを使い、`https://mobile.scombz.shibaura-it.ac.jp/{OTKEY}/...`形式の短命URLを返します。原本自体はMCPに埋め込みません。
+
+このURLのGETでは、OTKEYブリッジが302とSESSION Cookieを返し、同じCookieを保持してリダイレクトすると`application/pdf`が得られることを実測しています。一時IDを発行したセッションと、新規OTKEYで作った別セッションとの間でも取得できました。ただしChatGPT内蔵のHTTP取得機能がCookie付きリダイレクトに対応するかは未確認です。
+
+**注意:** URL自体が一時的な認証情報です。通常の会話・ログ・GitHub・共有ファイルに記録したり、リンクプレビュー・第三者のURL取得サービスに渡したりしないでください。`scombz:session`のOAuth承認を必要とします。今のところ教材PDFのみ対応し、課題添付や非PDFは従来の直接取得方法を使用してください。
 
 ### 教材の直接取得
 
