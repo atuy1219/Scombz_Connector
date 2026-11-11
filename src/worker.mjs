@@ -1,6 +1,7 @@
 import { ScombClient, ScombError } from './client.mjs';
 import { MobileAuthClient, MobileAuthStore } from './mobile-auth.mjs';
 import { mcpResponse } from './mcp.mjs';
+import { servePdfRelay } from './pdf-relay.mjs';
 import { html, script } from './ui.mjs';
 import { configured } from './crypto.mjs';
 import { oauth, admin, access, challenge, json, htmlResponse, readBody } from './oauth.mjs';
@@ -22,6 +23,8 @@ export async function handle(request, env, options = {}) {
       return json({ message: '別サイトからのリクエストは受け付けません。' }, 403);
     const authResponse = await oauth(request, env, origin);
     if (authResponse) return authResponse;
+    if (url.pathname.startsWith('/file/pdf/'))
+      return servePdfRelay(request, env, options);
     if (url.pathname === '/' && request.method === 'GET') return htmlResponse(html);
     if (url.pathname === '/ui.js' && request.method === 'GET')
       return new Response(script, {
@@ -66,7 +69,7 @@ export async function handle(request, env, options = {}) {
         return json({ message: 'Invalid JSON-RPC request' }, 400);
       const requiredScope =
         rpc.method === 'tools/call' &&
-        ['get_web_session', 'prepare_file_download', 'prepare_otkey_file_url'].includes(rpc.params?.name)
+        ['get_web_session', 'prepare_file_download', 'prepare_otkey_file_url', 'prepare_pdf_relay_url'].includes(rpc.params?.name)
           ? 'scombz:session'
           : 'scombz:read';
       if (!discovery.has(rpc.method) && !(await access(request, env, origin, requiredScope))) {
