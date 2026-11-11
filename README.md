@@ -59,6 +59,7 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 | `get_web_session` | 直接取得用のSESSIONと必須HTTPヘッダー |
 | `prepare_file_download` | 通常の教材取得用。SESSIONと取得手順を1回で準備 |
 | `prepare_otkey_file_url` | 実験的。教材PDFの一時IDを発行し、新しいOTKEYを含む短命の取得URLを返す（`scombz:session`） |
+| `prepare_pdf_relay_url` | WorkerがPDFを直接GETし、HTTP 200で原本を返す短命署名URLを発行する（`scombz:session`） |
 | `read_file` | 教材・課題添付の直接HTTP取得手順 |
 | `get_current_course` | 現在の授業候補 |
 | `get_current_course_materials` | 現在の授業の公開教材一覧 |
@@ -69,6 +70,12 @@ Bearerの不在・失効が確認されたときだけ再ログインを案内�
 
 前期は `first`、後期は `second`。省略時は日本時間の現在期を使い、1〜3月は前年度後期として扱います。
 
+
+### Workerによる原本PDF取得URL
+
+`prepare_pdf_relay_url(course_id, file_id)`は、署名付きの`https://<your-worker>/file/pdf/<token>`を返します（有効期間120秒）。このURLにGETすると、Workerが内部でScombZのSESSIONを使って一時ID発行・PDF取得・署名検証を行い、302なしの`HTTP 200 application/pdf`で原本を返します。外部クライアントにScombZのCookieやOTKEYを渡す必要はありません。
+
+リンクそのものは120秒間だけファイルを読める認証情報です。貼り付け・公開・ログ出力・外部URLプレビューは禁止し、必要な取得クライアントにだけ渡してください。サイズ上限は24MiBです。PDF本体はMCP応答には含まれません。ChatGPT側のHTTP取得機能が署名URLのPDFを直接読み取れるかは、利用環境で別途検証してください。PDF取得の目的で`files__materialize`を必須にはしません。
 
 ### OTKEY付きURLの生成（実験的）
 
