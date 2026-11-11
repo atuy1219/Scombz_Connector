@@ -90,6 +90,26 @@ export async function mcpResponse(request, env, options = {}) {
       wrap(handler),
     );
   register(
+    'probe_mcp_image',
+    'MCP画像応答の対応確認',
+    'MCPのimageコンテンツがChatGPTで認識できるかを調べる診断ツール。固定の48x48 PNGだけを返し、ScombZへの通信や個人情報の取得は一切行いません。',
+    {},
+    async () => ({
+      probe: 'mcp-image-v1',
+      image_mime_type: 'image/png',
+      image_dimensions: [48, 48],
+      _summary: '診断用のPNG画像をMCPのimageコンテンツとして返しました。画像の内容は説明していません。',
+      _content: [
+        {
+          type: 'image',
+          mimeType: 'image/png',
+          data: 'iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAv0lEQVR42u2YvQmAMBBGL8EBFOwdwk1cQytn0bGsLazsBVewEGwUuZ/4E/iuFAyPd4TvLi5tZwpR01gFOcfTzwpAAAIQgAAEIGElxv/Xpjh/XOpSfaBTp/0lih3LP0RDRHk/vGGIg2JRFfktU+iR9s4/TSNlirZlFj0iSYgOAAHoL0BZZ30CYCZazC2zSOIHvsyQjinu8UM8U++SmNGmmGKVhji9083U+q3jRpVl67CuQYcqvDECCEAAAhCAPqoNgyQ0PY7/sf4AAAAASUVORK5CYII=',
+          annotations: { audience: ['assistant'], priority: 1 },
+        },
+      ],
+    }),
+  );
+  register(
     'get_connection_status',
     '接続状態',
     'ScombZの接続状態を確認します。必要な場合は管理画面へのリンクも返します。',

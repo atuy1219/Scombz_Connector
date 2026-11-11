@@ -40,7 +40,8 @@ test('stateless MCP initialization and discovery advertise OAuth for all tools',
   assert.equal(notification.status, 202);
   const response = await handle(rpc({ jsonrpc: '2.0', id: 2, method: 'tools/list' }), env);
   const list = await response.json();
-  assert.equal(list.result.tools.length, 18);
+  assert.equal(list.result.tools.length, 19);
+  assert.ok(list.result.tools.some((tool) => tool.name === 'probe_mcp_image'));
   assert.equal(
     list.result.tools.some((tool) => tool.name === 'open_file_in_chat'),
     false,
