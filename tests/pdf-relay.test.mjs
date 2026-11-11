@@ -104,7 +104,7 @@ test('relay rejects bad PDF signature, content type and oversized Content-Length
     const client = { ...x.client, request: async (url) =>
       url.includes('/make/tempfile')
         ? new Response('a'.repeat(21), { headers: { 'Content-Type': 'text/plain' } })
-        : response.clone() };
+        : response };
     await assert.rejects(servePdfRelay(new Request(signed.url), env, { client }));
   }
 });
