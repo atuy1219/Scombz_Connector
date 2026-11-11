@@ -22,6 +22,8 @@ description: ScombZ MCPを使い、芝浦工業大学の本人の時間割、教
 
 付属スクリプトが使えない場合は`read_file`と`get_web_session`を使い、返された取得手順に従う。全GETで返されたheadersを使い、同じSESSIONで一時ID発行と原本取得を行う。リダイレクトを追跡せず、PDFの`%PDF-`署名を確認する。
 
+Chat側で直接HTTPが使えない場合、教材PDFに限り`prepare_otkey_file_url(course_id, file_id)`で新しいOTKEYを含む短命URLを生成できる。`scombz:session`権限が必要。GETで302・SESSION Cookieが発行されるため、取得クライアントはリダイレクトでCookieを保持する必要がある。ChatGPT自身がこの処理に対応するかは未検証。URLはログイン情報に相当するため、会話・ログ・外部のプレビューに露出しない。生成だけでは原本取得の成功を宣言しない。
+
 ## 認証とエラー
 
 - Cookieは指定されたScombZ originだけに送り、メモリ内で扱う。認証情報を会話で求めたり、コマンド引数・出力・ログ・ファイルに残したりしない。
